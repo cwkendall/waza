@@ -2,9 +2,9 @@ package execution
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -867,23 +867,11 @@ func captureWorkspaceFiles(dir string) map[string][]byte {
 		if statErr != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		resolved, resolveErr := filepath.EvalSymlinks(path)
-		if resolveErr != nil {
-			return nil
-		}
-		resolved, resolveErr = filepath.Abs(resolved)
-		if resolveErr != nil {
-			return nil
-		}
-		resolvedRel, relErr := filepath.Rel(root, resolved)
-		if relErr != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(os.PathSeparator)) {
-			return nil
-		}
 		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			return nil
 		}
-		content, readErr := os.ReadFile(path)
+		content, readErr := readCapturedFile(path, info)
 		if readErr != nil {
 			return nil
 		}
@@ -892,6 +880,23 @@ func captureWorkspaceFiles(dir string) map[string][]byte {
 		return nil
 	})
 	return files
+}
+
+func readCapturedFile(path string, expected os.FileInfo) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	actual, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !actual.Mode().IsRegular() || !os.SameFile(expected, actual) {
+		return nil, fmt.Errorf("workspace file changed while being captured")
+	}
+	return io.ReadAll(file)
 }
 
 func joinStrings(parts []string) string {
@@ -912,22 +917,27 @@ func sandboxPermissionHandler(next copilot.PermissionHandlerFunc) copilot.Permis
 			feedback := "managed policy requires interactive approval, which is unavailable during evaluations"
 			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
-		encoded, err := json.Marshal(request)
-		if err != nil {
-			return nil, fmt.Errorf("cannot inspect permission request: %w", err)
-		}
-		var fields struct {
-			RequestSandboxBypass bool `json:"requestSandboxBypass"`
-		}
-		if err := json.Unmarshal(encoded, &fields); err != nil {
-			return nil, fmt.Errorf("cannot inspect permission request: %w", err)
-		}
-		if fields.RequestSandboxBypass {
+		if permissionRequestsSandboxBypass(request) {
 			feedback := "sandbox bypass is disabled during evaluations"
 			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
 		return next(request, invocation)
 	}
+}
+
+func permissionRequestsSandboxBypass(request copilot.PermissionRequest) bool {
+	var requested *bool
+	switch value := request.(type) {
+	case *copilot.PermissionRequestRead:
+		requested = value.RequestSandboxBypass
+	case *copilot.PermissionRequestShell:
+		requested = value.RequestSandboxBypass
+	case *copilot.PermissionRequestURL:
+		requested = value.RequestSandboxBypass
+	case *copilot.PermissionRequestWrite:
+		requested = value.RequestSandboxBypass
+	}
+	return requested != nil && *requested
 }
 
 func resolveSandboxPaths(config models.SandboxConfig) (models.SandboxConfig, error) {
@@ -1016,22 +1026,14 @@ func validateSandboxPathPolicy(workspaceDir string, skillDirs []string, config m
 			}
 		}
 		for _, skillDir := range skillDirs {
-			canonicalSkillDir, err := canonicalSandboxPath(skillDir)
-			if err != nil {
-				return fmt.Errorf("resolving declared skill directory %q: %w", skillDir, err)
-			}
-			if pathsOverlap(readwritePath, canonicalSkillDir) {
-				return fmt.Errorf("read-write sandbox path %q overlaps declared skill directory %q", readwritePath, canonicalSkillDir)
+			if pathsOverlap(readwritePath, skillDir) {
+				return fmt.Errorf("read-write sandbox path %q overlaps declared skill directory %q", readwritePath, skillDir)
 			}
 		}
 	}
 	for _, skillDir := range skillDirs {
-		canonicalSkillDir, err := canonicalSandboxPath(skillDir)
-		if err != nil {
-			return fmt.Errorf("resolving declared skill directory %q: %w", skillDir, err)
-		}
-		if pathsOverlap(canonicalSkillDir, tempDir) {
-			return fmt.Errorf("declared skill directory %q overlaps denied temporary directory %q", canonicalSkillDir, tempDir)
+		if pathsOverlap(skillDir, tempDir) {
+			return fmt.Errorf("declared skill directory %q overlaps denied temporary directory %q", skillDir, tempDir)
 		}
 	}
 	return nil
@@ -1045,9 +1047,13 @@ func pathsOverlap(first, second string) bool {
 	return contains(first, second) || contains(second, first)
 }
 
-func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, config models.SandboxConfig) (*rpc.SessionUpdateOptionsParams, *rpc.PermissionsConfigureParams) {
+func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, config models.SandboxConfig) (*rpc.SessionUpdateOptionsParams, *rpc.PermissionsConfigureParams, error) {
 	if !config.Enabled {
-		return nil, nil
+		return nil, nil, nil
+	}
+	deniedTempDir, err := canonicalSandboxPath(os.TempDir())
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving denied temporary directory: %w", err)
 	}
 	readonlyPaths := append(append([]string{}, readonlyDirs...), config.ReadonlyPaths...)
 	readwritePaths := append([]string{workspaceDir}, config.ReadwritePaths...)
@@ -1063,7 +1069,7 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 			UserPolicy: &rpc.SandboxConfigUserPolicy{
 				Filesystem: &rpc.SandboxConfigUserPolicyFilesystem{
 					ClearPolicyOnExit: copilot.Bool(true),
-					DeniedPaths:       []string{os.TempDir()},
+					DeniedPaths:       []string{deniedTempDir},
 					ReadonlyPaths:     readonlyPaths,
 					ReadwritePaths:    readwritePaths,
 				},
@@ -1080,8 +1086,7 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 			WorkspacePath:         &workspaceDir,
 			IncludeTempDirectory:  copilot.Bool(false),
 			Unrestricted:          copilot.Bool(false),
-		},
-	}
+		}, nil
 }
 
 // streamingPtr converts the caller's bool Streaming field into the *bool the
@@ -1103,6 +1108,7 @@ type skillDefinition struct {
 
 func discoverSkillDefinitions(skillDirs []string) []skillDefinition {
 	var skills []skillDefinition
+
 	for _, dir := range skillDirs {
 		// Check direct SKILL.md in this directory
 		if sd := loadSkillDefinition(dir); sd != nil {
