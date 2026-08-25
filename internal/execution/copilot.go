@@ -1073,9 +1073,11 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 			SandboxConfig: &rpc.SandboxConfig{
 				Enabled:                    true,
 				AddCurrentWorkingDirectory: copilot.Bool(false),
-				AllowDevToolCaches:         copilot.Bool(config.AllowDevToolCaches),
-				GhAuth:                     copilot.Bool(config.GHAuth),
-				GitAuth:                    copilot.Bool(config.GitAuth),
+				AllowDevToolAccess:         copilot.Bool(config.AllowDevToolCaches),
+				Auth: &rpc.SandboxConfigAuth{
+					Gh:  copilot.Bool(config.GHAuth),
+					Git: copilot.Bool(config.GitAuth),
+				},
 				UserPolicy: &rpc.SandboxConfigUserPolicy{
 					Filesystem: &rpc.SandboxConfigUserPolicyFilesystem{
 						ClearPolicyOnExit: copilot.Bool(true),
