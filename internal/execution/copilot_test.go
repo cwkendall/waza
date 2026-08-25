@@ -80,9 +80,9 @@ func TestSessionSandboxConfiguration_RestrictsAccessToWorkspace(t *testing.T) {
 
 	require.True(t, options.SandboxConfig.Enabled)
 	require.False(t, *options.SandboxConfig.AddCurrentWorkingDirectory)
-	require.False(t, *options.SandboxConfig.AllowDevToolCaches)
-	require.False(t, *options.SandboxConfig.GhAuth)
-	require.False(t, *options.SandboxConfig.GitAuth)
+	require.False(t, *options.SandboxConfig.AllowDevToolAccess)
+	require.False(t, *options.SandboxConfig.Auth.Gh)
+	require.False(t, *options.SandboxConfig.Auth.Git)
 	require.Equal(
 		t,
 		[]string{workspace, declaredReadwrite},
@@ -240,11 +240,11 @@ func TestSessionSandboxConfiguration_AppliesExplicitCapabilityOptIns(t *testing.
 	require.NoError(t, err)
 
 	sandbox := options.SandboxConfig
-	require.True(t, *sandbox.AllowDevToolCaches)
+	require.True(t, *sandbox.AllowDevToolAccess)
 	require.True(t, *sandbox.UserPolicy.Network.AllowOutbound)
 	require.True(t, *sandbox.UserPolicy.Network.AllowLocalNetwork)
-	require.True(t, *sandbox.GitAuth)
-	require.True(t, *sandbox.GhAuth)
+	require.True(t, *sandbox.Auth.Git)
+	require.True(t, *sandbox.Auth.Gh)
 }
 
 func TestSessionSandboxConfiguration_DisabledLeavesCopilotPolicyUnchanged(t *testing.T) {
