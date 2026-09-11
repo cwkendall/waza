@@ -22,14 +22,64 @@ import (
 
 var enableLiveCopilotTests = os.Getenv("ENABLE_COPILOT_TESTS") == "true"
 
-func TestSandboxPermissionHandler_ApprovesOrdinaryRequests(t *testing.T) {
-	result, err := sandboxPermissionHandler(allowAllTools)(
-		&copilot.PermissionRequestShell{},
-		copilot.PermissionInvocation{},
-	)
-	require.NoError(t, err)
-	_, ok := result.(*rpc.PermissionDecisionApproveOnce)
-	require.True(t, ok, "expected an ApproveOnce decision, got %T", result)
+func TestSandboxPermissionHandler_DelegatesSandboxSafeRequests(t *testing.T) {
+	requests := map[string]copilot.PermissionRequest{
+		"custom tool": &copilot.PermissionRequestCustomTool{},
+		"mcp":         &copilot.PermissionRequestMCP{},
+		"read":        &copilot.PermissionRequestRead{},
+		"shell":       &copilot.PermissionRequestShell{},
+		"url":         &copilot.PermissionRequestURL{},
+		"write":       &copilot.PermissionRequestWrite{},
+	}
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			delegated := false
+			result, err := sandboxPermissionHandler(func(
+				got copilot.PermissionRequest,
+				_ copilot.PermissionInvocation,
+			) (rpc.PermissionDecision, error) {
+				delegated = true
+				require.Same(t, request, got)
+				return &rpc.PermissionDecisionApproveOnce{}, nil
+			})(request, copilot.PermissionInvocation{})
+
+			require.NoError(t, err)
+			require.True(t, delegated)
+			_, ok := result.(*rpc.PermissionDecisionApproveOnce)
+			require.True(t, ok, "expected an ApproveOnce decision, got %T", result)
+		})
+	}
+}
+
+func TestSandboxPermissionHandler_RejectsUnsupportedRequests(t *testing.T) {
+	requests := map[string]copilot.PermissionRequest{
+		"extension management":        &copilot.PermissionRequestExtensionManagement{},
+		"extension permission access": &copilot.PermissionRequestExtensionPermissionAccess{},
+		"factory":                     &copilot.PermissionRequestFactory{},
+		"hook":                        &copilot.PermissionRequestHook{},
+		"memory":                      &copilot.PermissionRequestMemory{},
+		"unknown": &copilot.RawPermissionRequest{
+			Discriminator: copilot.PermissionRequestKind("future-capability"),
+			Raw:           []byte(`{"kind":"future-capability"}`),
+		},
+	}
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			delegated := false
+			result, err := sandboxPermissionHandler(func(
+				copilot.PermissionRequest,
+				copilot.PermissionInvocation,
+			) (rpc.PermissionDecision, error) {
+				delegated = true
+				return &rpc.PermissionDecisionApproveOnce{}, nil
+			})(request, copilot.PermissionInvocation{})
+
+			require.NoError(t, err)
+			require.False(t, delegated)
+			_, ok := result.(*rpc.PermissionDecisionReject)
+			require.True(t, ok, "expected a Reject decision, got %T", result)
+		})
+	}
 }
 
 func TestSandboxPermissionHandler_RejectsBypassRequests(t *testing.T) {

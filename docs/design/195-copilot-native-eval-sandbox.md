@@ -73,7 +73,7 @@ The runner passes the eval sandbox configuration and resolved skill directories 
 
 1. updates the session's native sandbox options;
 2. configures Copilot's path-permission manager with the task workspace and declared skills;
-3. rejects any permission request that asks to bypass the sandbox or requires interactive managed-policy approval; and
+3. delegates permission requests only for sandbox-governed built-in operations and configured custom or MCP tools, rejecting sandbox bypass, interactive managed-policy approval, unsupported control-plane capabilities, and unknown request types; and
 4. fails the task closed if Copilot policy configuration fails.
 
 An omitted or disabled `sandbox` block sends no sandbox configuration RPC and uses the existing Copilot client process configuration. The field itself still requires schema 1.3 and the `copilot-sdk` executor, including when disabled. Waza therefore never weakens a sandbox policy inherited from Copilot or an organisation and does not change existing evaluations that omit the block.
