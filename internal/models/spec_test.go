@@ -99,6 +99,45 @@ config:
 	require.ErrorContains(t, err, `unknown sandbox field "enabeld"`)
 }
 
+func TestLoadEvalSpec_RequiresSandboxEnabled(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "spec.yaml")
+	err := os.WriteFile(specPath, []byte(`schemaVersion: "1.3"
+name: sandboxed
+skill: test-skill
+config:
+  trials_per_task: 1
+  timeout_seconds: 60
+  executor: copilot-sdk
+  model: test-model
+  sandbox: {}
+`), 0o644)
+	require.NoError(t, err)
+
+	_, err = LoadEvalSpec(specPath)
+	require.ErrorContains(t, err, "sandbox.enabled is required")
+}
+
+func TestLoadEvalSpec_AllowsExplicitlyDisabledSandbox(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "spec.yaml")
+	err := os.WriteFile(specPath, []byte(`schemaVersion: "1.3"
+name: sandboxed
+skill: test-skill
+config:
+  trials_per_task: 1
+  timeout_seconds: 60
+  executor: copilot-sdk
+  model: test-model
+  sandbox:
+    enabled: false
+`), 0o644)
+	require.NoError(t, err)
+
+	spec, err := LoadEvalSpec(specPath)
+	require.NoError(t, err)
+	require.NotNil(t, spec.Config.Sandbox)
+	require.False(t, spec.Config.Sandbox.Enabled)
+}
+
 func TestEvalSpec_Validate_SandboxRequiresSchemaVersion13(t *testing.T) {
 	spec := &EvalSpec{
 		SchemaVersion: "1.2",

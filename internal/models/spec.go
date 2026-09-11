@@ -112,12 +112,18 @@ func (s *SandboxConfig) UnmarshalYAML(node *yaml.Node) error {
 		"git_auth": true, "gh_auth": true,
 		"readonly_paths": true, "readwrite_paths": true,
 	}
+	enabledPresent := false
 	if node.Kind == yaml.MappingNode {
 		for i := 0; i < len(node.Content); i += 2 {
-			if field := node.Content[i].Value; !allowed[field] {
+			field := node.Content[i].Value
+			if !allowed[field] {
 				return fmt.Errorf("unknown sandbox field %q", field)
 			}
+			enabledPresent = enabledPresent || field == "enabled"
 		}
+	}
+	if !enabledPresent {
+		return fmt.Errorf("sandbox.enabled is required")
 	}
 
 	type rawSandboxConfig SandboxConfig

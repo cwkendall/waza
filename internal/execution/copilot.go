@@ -920,7 +920,18 @@ func sandboxPermissionHandler(next copilot.PermissionHandlerFunc) copilot.Permis
 			feedback := "sandbox bypass is disabled during evaluations"
 			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
-		return next(request, invocation)
+		switch request.(type) {
+		case *copilot.PermissionRequestCustomTool,
+			*copilot.PermissionRequestMCP,
+			*copilot.PermissionRequestRead,
+			*copilot.PermissionRequestShell,
+			*copilot.PermissionRequestURL,
+			*copilot.PermissionRequestWrite:
+			return next(request, invocation)
+		default:
+			feedback := fmt.Sprintf("permission request %q is unavailable during sandboxed evaluations", request.Kind())
+			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+		}
 	}
 }
 

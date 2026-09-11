@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -155,6 +156,77 @@ tasks:
 	errs := ValidateEvalBytes([]byte(yaml))
 	require.NotEmpty(t, errs)
 	require.Contains(t, joinErrs(errs), "copilot-sdk")
+}
+
+func TestValidateEvalBytes_SandboxRequiresSchemaVersion13(t *testing.T) {
+	yaml := `name: test-eval
+skill: test-skill
+schemaVersion: "1.2"
+config:
+  trials_per_task: 1
+  timeout_seconds: 60
+  executor: copilot-sdk
+  model: gpt-4o
+  sandbox:
+    enabled: true
+metrics:
+  - name: accuracy
+    weight: 1.0
+    threshold: 0.8
+tasks:
+  - "tasks/*.yaml"
+`
+	errs := ValidateEvalBytes([]byte(yaml))
+	require.NotEmpty(t, errs)
+	require.Contains(t, joinErrs(errs), "1.3")
+}
+
+func TestValidateEvalBytes_SandboxAcceptsSchemaVersion13OrNewer(t *testing.T) {
+	for _, version := range []string{"1.3", "1.10"} {
+		t.Run(version, func(t *testing.T) {
+			yaml := fmt.Sprintf(`name: test-eval
+skill: test-skill
+schemaVersion: %q
+config:
+  trials_per_task: 1
+  timeout_seconds: 60
+  executor: copilot-sdk
+  model: gpt-4o
+  sandbox:
+    enabled: true
+metrics:
+  - name: accuracy
+    weight: 1.0
+    threshold: 0.8
+tasks:
+  - "tasks/*.yaml"
+`, version)
+			errs := ValidateEvalBytes([]byte(yaml))
+			require.Empty(t, errs)
+		})
+	}
+}
+
+func TestValidateEvalBytes_SandboxRequiresExplicitExecutor(t *testing.T) {
+	yaml := `name: test-eval
+skill: test-skill
+schemaVersion: "1.3"
+config:
+  trials_per_task: 1
+  timeout_seconds: 60
+  model: gpt-4o
+  sandbox:
+    enabled: true
+metrics:
+  - name: accuracy
+    weight: 1.0
+    threshold: 0.8
+tasks:
+  - "tasks/*.yaml"
+`
+	errs := ValidateEvalBytes([]byte(yaml))
+	require.NotEmpty(t, errs)
+	require.Contains(t, joinErrs(errs), "executor")
 }
 
 func TestValidateTaskBytes_Valid(t *testing.T) {
