@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -460,14 +461,19 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 	}
 
 	sessionID := session.SessionID()
+	deleteSession := req.EphemeralSession && req.SessionID == ""
+	sessionCleaned := false
 	defer func() {
+		if sessionCleaned {
+			return
+		}
 		// Close the session, release its resources, and trigger any session end events. The destroy
 		// operation doesn't remove data and isn't final in that the caller can resume the session by
 		// calling Execute again with [ExecutionRequest.SessionID] set
 		if err := session.Disconnect(); err != nil {
 			slog.Info("failed to destroy session", "sessionID", sessionID, "error", err)
 		}
-		if req.EphemeralSession && req.SessionID == "" {
+		if deleteSession {
 			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancelDelete()
 			if err := e.client.DeleteSession(deleteCtx, sessionID); err != nil {
@@ -477,7 +483,18 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 	}()
 	if sandbox != nil && sandbox.Enabled {
 		if err := session.ConfigureSandbox(ctx, workspaceDir, skillDirs, *sandbox); err != nil {
-			return nil, fmt.Errorf("failed to configure Copilot sandbox: %w", err)
+			configureErr := fmt.Errorf("failed to configure Copilot sandbox: %w", err)
+			disconnectErr := session.Disconnect()
+			sessionCleaned = true
+			if req.SessionID != "" {
+				return nil, errors.Join(configureErr, disconnectErr)
+			}
+			// A newly created session that never acquired its requested sandbox
+			// policy must not remain resumable with a weaker policy.
+			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 30*time.Second)
+			deleteErr := e.client.DeleteSession(deleteCtx, sessionID)
+			cancelDelete()
+			return nil, errors.Join(configureErr, disconnectErr, deleteErr)
 		}
 	}
 
@@ -851,52 +868,28 @@ func captureWorkspaceFiles(dir string) map[string][]byte {
 	}
 
 	files := make(map[string][]byte)
-	root, err := filepath.EvalSymlinks(dir)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return files
 	}
-	root, err = filepath.Abs(root)
-	if err != nil {
-		return files
-	}
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	defer root.Close()
+	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		info, statErr := os.Lstat(path)
+		info, statErr := root.Lstat(path)
 		if statErr != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return nil
-		}
-		content, readErr := readCapturedFile(path, info)
+		content, readErr := root.ReadFile(path)
 		if readErr != nil {
 			return nil
 		}
 		// Normalize to forward slashes so map keys match eval YAML paths on all platforms.
-		files[filepath.ToSlash(rel)] = content
+		files[filepath.ToSlash(path)] = content
 		return nil
 	})
 	return files
-}
-
-func readCapturedFile(path string, expected os.FileInfo) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	actual, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !actual.Mode().IsRegular() || !os.SameFile(expected, actual) {
-		return nil, fmt.Errorf("workspace file changed while being captured")
-	}
-	return io.ReadAll(file)
 }
 
 func joinStrings(parts []string) string {
@@ -926,6 +919,10 @@ func sandboxPermissionHandler(next copilot.PermissionHandlerFunc) copilot.Permis
 			*copilot.PermissionRequestMCP,
 			*copilot.PermissionRequestRead,
 			*copilot.PermissionRequestShell,
+			// Copilot CLI 1.0.80+ applies the configured native network policy to
+			// built-in URL operations, including redirects and cross-origin fetches.
+			// Keep approval delegation here so stronger inherited policy can still
+			// reject a request without duplicating network enforcement in Waza.
 			*copilot.PermissionRequestURL,
 			*copilot.PermissionRequestWrite:
 			return next(request, invocation)
@@ -952,54 +949,14 @@ func permissionRequestsSandboxBypass(request copilot.PermissionRequest) bool {
 }
 
 func resolveSandboxPaths(config models.SandboxConfig) (models.SandboxConfig, error) {
-	resolve := func(values []string) ([]string, error) {
-		if values == nil {
-			return nil, nil
-		}
-		resolved := make([]string, 0, len(values))
-		for _, value := range values {
-			missingVariable := ""
-			path := os.Expand(value, func(name string) string {
-				expanded, ok := os.LookupEnv(name)
-				if (!ok || expanded == "") && missingVariable == "" {
-					missingVariable = name
-				}
-				return expanded
-			})
-			if missingVariable != "" {
-				return nil, fmt.Errorf("sandbox path %q references unset or empty environment variable %s", value, missingVariable)
-			}
-			if path == "~" || strings.HasPrefix(path, "~/") {
-				home, err := os.UserHomeDir()
-				if err != nil {
-					return nil, fmt.Errorf("resolving sandbox path %q: %w", value, err)
-				}
-				path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
-			}
-			if path == "" || !filepath.IsAbs(path) {
-				return nil, fmt.Errorf("sandbox path %q must resolve to an absolute path", value)
-			}
-			canonical, err := canonicalSandboxPath(path)
-			if err != nil {
-				return nil, fmt.Errorf("sandbox path %q must resolve to an existing path: %w", value, err)
-			}
-			resolved = append(resolved, canonical)
-		}
-		return resolved, nil
-	}
-	var err error
-	config.ReadonlyPaths, err = resolve(config.ReadonlyPaths)
+	resolved, err := config.ResolvePaths()
 	if err != nil {
-		return config, err
+		return resolved, err
 	}
-	config.ReadwritePaths, err = resolve(config.ReadwritePaths)
-	if err != nil {
-		return config, err
+	if err := validateSandboxPathPolicy("", nil, resolved); err != nil {
+		return resolved, err
 	}
-	if err := validateSandboxPathPolicy("", nil, config); err != nil {
-		return config, err
-	}
-	return config, nil
+	return resolved, nil
 }
 
 func canonicalSandboxPath(path string) (string, error) {
@@ -1011,19 +968,26 @@ func canonicalSandboxPath(path string) (string, error) {
 }
 
 func validateSandboxPathPolicy(workspaceDir string, skillDirs []string, config models.SandboxConfig) error {
-	tempDir, err := canonicalSandboxPath(os.TempDir())
+	tempDirs, err := deniedTemporaryRoots()
 	if err != nil {
-		return fmt.Errorf("resolving denied temporary directory: %w", err)
+		return err
 	}
-	for _, path := range append(append([]string{}, config.ReadonlyPaths...), config.ReadwritePaths...) {
-		if pathsOverlap(path, tempDir) {
-			return fmt.Errorf("sandbox path %q overlaps denied temporary directory %q", path, tempDir)
+	for _, tempDir := range tempDirs {
+		for _, path := range append(append([]string{}, config.ReadonlyPaths...), config.ReadwritePaths...) {
+			if pathsOverlap(path, tempDir) {
+				return fmt.Errorf("sandbox path %q overlaps denied temporary directory %q", path, tempDir)
+			}
+		}
+		if workspaceDir != "" && pathsOverlap(workspaceDir, tempDir) {
+			return fmt.Errorf("sandbox workspace %q overlaps denied temporary directory %q", workspaceDir, tempDir)
+		}
+		for _, skillDir := range skillDirs {
+			if pathsOverlap(skillDir, tempDir) {
+				return fmt.Errorf("declared skill directory %q overlaps denied temporary directory %q", skillDir, tempDir)
+			}
 		}
 	}
 	if workspaceDir != "" {
-		if pathsOverlap(workspaceDir, tempDir) {
-			return fmt.Errorf("sandbox workspace %q overlaps denied temporary directory %q", workspaceDir, tempDir)
-		}
 		for _, readonlyPath := range config.ReadonlyPaths {
 			if pathsOverlap(workspaceDir, readonlyPath) {
 				return fmt.Errorf("sandbox workspace %q overlaps read-only path %q", workspaceDir, readonlyPath)
@@ -1042,12 +1006,41 @@ func validateSandboxPathPolicy(workspaceDir string, skillDirs []string, config m
 			}
 		}
 	}
-	for _, skillDir := range skillDirs {
-		if pathsOverlap(skillDir, tempDir) {
-			return fmt.Errorf("declared skill directory %q overlaps denied temporary directory %q", skillDir, tempDir)
-		}
-	}
 	return nil
+}
+
+func deniedTemporaryRoots() ([]string, error) {
+	candidates := []string{os.TempDir()}
+	for _, name := range []string{"TMPDIR", "TEMP", "TMP"} {
+		candidates = append(candidates, os.Getenv(name))
+	}
+	if runtime.GOOS == "windows" {
+		candidates = append(candidates, filepath.Join(os.Getenv("SystemRoot"), "Temp"))
+	} else {
+		candidates = append(candidates, "/tmp")
+	}
+
+	roots := make([]string, 0, len(candidates))
+	seen := make(map[string]bool)
+	for _, value := range candidates {
+		if !validTemporaryDirectory(value) {
+			continue
+		}
+		canonical, err := canonicalSandboxPath(value)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(canonical)
+		if err != nil || !info.IsDir() || seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		roots = append(roots, canonical)
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("could not determine a valid temporary directory to deny")
+	}
+	return roots, nil
 }
 
 func pathsOverlap(first, second string) bool {
@@ -1073,13 +1066,18 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 	if !config.Enabled {
 		return nil, nil, nil
 	}
-	deniedTempDir, err := canonicalSandboxPath(os.TempDir())
+	deniedTempDirs, err := deniedTemporaryRoots()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolving denied temporary directory: %w", err)
+		return nil, nil, err
 	}
 	readonlyPaths := append(append([]string{}, readonlyDirs...), config.ReadonlyPaths...)
 	readwritePaths := append([]string{workspaceDir}, config.ReadwritePaths...)
-	additionalDirectories := append(append([]string{}, readonlyPaths...), config.ReadwritePaths...)
+	additionalDirectories := make([]string, 0, len(readonlyPaths)+len(config.ReadwritePaths))
+	for _, path := range append(append([]string{}, readonlyPaths...), config.ReadwritePaths...) {
+		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			additionalDirectories = append(additionalDirectories, path)
+		}
+	}
 
 	return &rpc.SessionUpdateOptionsParams{
 		SandboxConfig: &rpc.SandboxConfig{
@@ -1093,7 +1091,7 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 			UserPolicy: &rpc.SandboxConfigUserPolicy{
 				Filesystem: &rpc.SandboxConfigUserPolicyFilesystem{
 					ClearPolicyOnExit: copilot.Bool(true),
-					DeniedPaths:       []string{deniedTempDir},
+					DeniedPaths:       deniedTempDirs,
 					ReadonlyPaths:     readonlyPaths,
 					ReadwritePaths:    readwritePaths,
 				},

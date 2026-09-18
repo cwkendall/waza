@@ -37,6 +37,8 @@ This is the same architectural pattern used by other coding harnesses: the host 
 Sandboxing is opt-in and therefore does not change existing evaluations:
 
 ```yaml
+schemaVersion: "1.3"
+
 config:
   executor: copilot-sdk
   sandbox:
@@ -80,7 +82,7 @@ An omitted or disabled `sandbox` block sends no sandbox configuration RPC and us
 
 ## Copilot process environment
 
-The Copilot CLI subprocess is shared across sessions, so its environment cannot be isolated by per-session sandbox policy. Waza therefore uses a distinct shared client process for sandboxed evaluations and gives that process a minimal operational environment. It retains standard runtime, locale, temporary-directory, proxy, CA-bundle, XDG, Windows runtime, and `COPILOT_HOME` variables from an explicit allowlist; arbitrary host variables are not inherited. Proxy values containing credentials or URL components beyond the proxy origin are omitted rather than exposing them to child tools.
+The Copilot CLI subprocess is shared across sessions, so its environment cannot be isolated by per-session sandbox policy. Waza therefore uses a distinct shared client process for sandboxed evaluations and gives that process a minimal operational environment. It retains standard runtime, locale, valid temporary-directory, proxy, CA-bundle, XDG, Windows runtime, and `COPILOT_HOME` variables from an explicit allowlist; arbitrary host variables are not inherited. Every retained temporary-directory root is added to the deny policy. Invalid temporary-directory values and proxy values containing credentials or URL components beyond the proxy origin are omitted rather than exposing them to child tools.
 
 GitHub authentication is passed explicitly through the Copilot SDK, in the precedence `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, then `GITHUB_TOKEN`. When none is set, Copilot can use its persisted login through the retained home directory. Custom provider credentials remain in Waza and are supplied in the per-session provider configuration rather than the CLI process environment.
 
@@ -92,7 +94,7 @@ Model-backed prompt-grader turns retain the evaluated task's sandbox configurati
 
 - Sandboxed Copilot CLI processes receive an allowlisted environment, but retained credential-free proxy and CA configuration remain visible to child tools.
 - Copilot applies the OS sandbox to local MCP and LSP subprocesses by default. Remote MCP servers are outside the local process boundary.
-- Copilot's built-in file tools run in the CLI process and enforce the configured policy in application code on a best-effort basis rather than through MXC.
+- Copilot's built-in file and URL tools run in the CLI process. The bundled Copilot CLI 1.0.80 enforces the configured filesystem and network policy in application code, including redirect and cross-origin URL checks.
 - Prompt graders retain the task sandbox. Program graders run after agent execution with host permissions and remain an explicitly trusted extension boundary; sandboxing them requires a separate executor design.
 - Workspace capture excludes symlinks so post-run grading cannot follow a model-created link outside the task boundary.
 - The Copilot sandbox is a filesystem, network, and credential boundary; it does not impose CPU, memory, process-count, or output-size quotas. Run untrusted or adversarial evaluations inside an outer resource-limited environment.

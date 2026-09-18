@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -171,11 +172,22 @@ func sanitizedCLIEnv(environ []string) []string {
 		if runtime.GOOS == "windows" {
 			allowedName = allowed[upper]
 		}
+		if (upper == "TMPDIR" || upper == "TEMP" || upper == "TMP") && !validTemporaryDirectory(value) {
+			continue
+		}
 		if allowedName && (!proxyVariables[upper] || safeProxyURL(value)) {
 			result = append(result, entry)
 		}
 	}
 	return result
+}
+
+func validTemporaryDirectory(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func safeProxyURL(value string) bool {

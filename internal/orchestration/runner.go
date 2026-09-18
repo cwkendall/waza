@@ -223,7 +223,7 @@ func NewEvalRunner(cfg *config.EvalConfig, engine execution.AgentEngine, opts ..
 		failureHandler: failures.NewHandler(),
 	}
 	r.newClassifier = func(cfg models.ResponderConfig, defaultModel string) responderClassifier {
-		return responder.New(r.engine, cfg, defaultModel)
+		return responder.New(r.engine, cfg, defaultModel, r.cfg.Spec().Config.Sandbox)
 	}
 	for _, o := range opts {
 		o(r)

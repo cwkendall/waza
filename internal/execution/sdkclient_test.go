@@ -237,6 +237,17 @@ func TestSanitizedCLIEnv_AllowsRuntimeConfigurationAndRejectsHostSecrets(t *test
 	require.NotNil(t, sanitizedCLIEnv(nil))
 }
 
+func TestSanitizedCLIEnv_DropsInvalidTemporaryDirectories(t *testing.T) {
+	valid := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	require.Equal(t, []string{"TMPDIR=" + valid}, sanitizedCLIEnv([]string{
+		"TMPDIR=" + valid,
+		"TEMP=" + missing,
+		"TMP=relative",
+	}))
+}
+
 func TestSharedClientOptions_SanitizesEnvironmentAndPassesAuthenticationExplicitly(t *testing.T) {
 	cliPath := filepath.Join(t.TempDir(), "copilot")
 	require.NoError(t, os.WriteFile(cliPath, []byte("test executable"), 0o755))

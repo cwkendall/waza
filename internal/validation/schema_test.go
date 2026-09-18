@@ -251,12 +251,15 @@ tasks:
 }
 
 func TestValidateEvalBytes_SandboxAcceptsSchemaVersion13OrNewer(t *testing.T) {
-	for _, version := range []string{"1.3", "1.10"} {
+	for _, version := range []string{"", "1.3", "1.10"} {
 		t.Run(version, func(t *testing.T) {
+			versionLine := ""
+			if version != "" {
+				versionLine = fmt.Sprintf("schemaVersion: %q\n", version)
+			}
 			yaml := fmt.Sprintf(`name: test-eval
 skill: test-skill
-schemaVersion: %q
-config:
+%sconfig:
   trials_per_task: 1
   timeout_seconds: 60
   executor: copilot-sdk
@@ -269,7 +272,7 @@ metrics:
     threshold: 0.8
 tasks:
   - "tasks/*.yaml"
-`, version)
+`, versionLine)
 			errs := ValidateEvalBytes([]byte(yaml))
 			require.Empty(t, errs)
 		})

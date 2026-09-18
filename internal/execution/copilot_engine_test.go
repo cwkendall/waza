@@ -208,6 +208,7 @@ func TestCopilotEngine_Execute_FailsClosedWhenSandboxConfigurationFails(t *testi
 	sandbox := models.SandboxConfig{Enabled: true}
 
 	clientMock.EXPECT().CreateSession(gomock.Any(), gomock.Any()).Return(sessionMock, nil)
+	clientMock.EXPECT().DeleteSession(gomock.Any(), "sandbox-session")
 	sessionMock.EXPECT().SessionID().Return("sandbox-session")
 	sessionMock.EXPECT().ConfigureSandbox(gomock.Any(), gomock.Any(), gomock.Any(), sandbox).
 		Return(errors.New("sandbox unavailable"))
@@ -227,6 +228,35 @@ func TestCopilotEngine_Execute_FailsClosedWhenSandboxConfigurationFails(t *testi
 
 	require.Nil(t, resp)
 	require.ErrorContains(t, err, "failed to configure Copilot sandbox: sandbox unavailable")
+}
+
+func TestCopilotEngine_Execute_ReportsFailedSandboxSessionDeletion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := newClientMock(ctrl)
+	sessionMock := NewMockCopilotSession(ctrl)
+	sandbox := models.SandboxConfig{Enabled: true}
+
+	clientMock.EXPECT().CreateSession(gomock.Any(), gomock.Any()).Return(sessionMock, nil)
+	clientMock.EXPECT().DeleteSession(gomock.Any(), "sandbox-session").Return(errors.New("delete failed"))
+	sessionMock.EXPECT().SessionID().Return("sandbox-session")
+	sessionMock.EXPECT().ConfigureSandbox(gomock.Any(), gomock.Any(), gomock.Any(), sandbox).
+		Return(errors.New("sandbox unavailable"))
+	sessionMock.EXPECT().Disconnect()
+
+	engine := NewCopilotEngineBuilder("test-model", &CopilotEngineBuilderOptions{
+		NewCopilotClient:    func(*copilot.ClientOptions) CopilotClient { return clientMock },
+		SanitizeEnvironment: true,
+	}).Build()
+	require.NoError(t, engine.Initialize(context.Background()))
+	t.Cleanup(func() { require.NoError(t, engine.Shutdown(context.Background())) })
+
+	resp, err := engine.Execute(context.Background(), &ExecutionRequest{
+		Message: "hello",
+		Sandbox: &sandbox,
+	})
+	require.Nil(t, resp)
+	require.ErrorContains(t, err, "sandbox unavailable")
+	require.ErrorContains(t, err, "delete failed")
 }
 
 func TestCopilotEngine_Execute_DisabledSandboxLeavesInheritedPolicyUnchanged(t *testing.T) {

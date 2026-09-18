@@ -118,7 +118,9 @@ func TestSessionSandboxConfiguration_RestrictsAccessToWorkspace(t *testing.T) {
 	skillDir := t.TempDir()
 	declaredReadonly := filepath.Join(t.TempDir(), "read-only")
 	declaredReadwrite := filepath.Join(t.TempDir(), "read-write")
-	canonicalTempDir, err := canonicalSandboxPath(os.TempDir())
+	require.NoError(t, os.Mkdir(declaredReadonly, 0o755))
+	require.NoError(t, os.Mkdir(declaredReadwrite, 0o755))
+	expectedDeniedPaths, err := deniedTemporaryRoots()
 	require.NoError(t, err)
 
 	options, permissions, err := sessionSandboxConfiguration(workspace, []string{skillDir}, models.SandboxConfig{
@@ -138,7 +140,7 @@ func TestSessionSandboxConfiguration_RestrictsAccessToWorkspace(t *testing.T) {
 		[]string{workspace, declaredReadwrite},
 		options.SandboxConfig.UserPolicy.Filesystem.ReadwritePaths,
 	)
-	require.Equal(t, []string{canonicalTempDir}, options.SandboxConfig.UserPolicy.Filesystem.DeniedPaths)
+	require.Equal(t, expectedDeniedPaths, options.SandboxConfig.UserPolicy.Filesystem.DeniedPaths)
 	require.Equal(
 		t,
 		[]string{skillDir, declaredReadonly},
@@ -155,6 +157,48 @@ func TestSessionSandboxConfiguration_RestrictsAccessToWorkspace(t *testing.T) {
 	)
 	require.False(t, *permissions.Paths.IncludeTempDirectory)
 	require.False(t, *permissions.Paths.Unrestricted)
+}
+
+func TestSessionSandboxConfiguration_AdditionalDirectoriesExcludeFiles(t *testing.T) {
+	workspace := t.TempDir()
+	directory := t.TempDir()
+	file := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(file, []byte("certificate"), 0o644))
+
+	_, permissions, err := sessionSandboxConfiguration(workspace, nil, models.SandboxConfig{
+		Enabled:       true,
+		ReadonlyPaths: []string{file, directory},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{directory}, permissions.Paths.AdditionalDirectories)
+}
+
+func TestDeniedTemporaryRoots_IncludesDistinctEnvironmentDirectories(t *testing.T) {
+	defaultTemp := os.TempDir()
+	distinctTemp := newSandboxTestRoot(t)
+	t.Setenv("TMPDIR", defaultTemp)
+	t.Setenv("TEMP", distinctTemp)
+	t.Setenv("TMP", "relative-invalid")
+
+	roots, err := deniedTemporaryRoots()
+	require.NoError(t, err)
+	require.Contains(t, roots, distinctTemp)
+	require.NotContains(t, roots, "relative-invalid")
+}
+
+func TestDeniedTemporaryRoots_IgnoresInvalidPrimaryTempDirectory(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("TEMP", "")
+	t.Setenv("TMP", "")
+
+	roots, err := deniedTemporaryRoots()
+	require.NoError(t, err)
+	require.NotEmpty(t, roots)
+	for _, root := range roots {
+		info, statErr := os.Stat(root)
+		require.NoError(t, statErr)
+		require.True(t, info.IsDir())
+	}
 }
 
 func TestResolveSandboxPaths_ExpandsHomeAndEnvironment(t *testing.T) {
