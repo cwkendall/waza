@@ -3,6 +3,7 @@ package graders
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -66,7 +67,11 @@ func (fg *fileGrader) Grade(ctx context.Context, gradingContext *Context) (*mode
 			if err != nil {
 				return nil, fmt.Errorf("opening workspace for file grading: %w", err)
 			}
-			defer root.Close()
+			defer func() {
+				if err := root.Close(); err != nil {
+					slog.WarnContext(ctx, "closing file grader workspace", "path", workspaceDir, "error", err)
+				}
+			}()
 		}
 
 		failures = append(failures, fg.checkMustExist(root, gradingContext.WorkspaceFiles)...)

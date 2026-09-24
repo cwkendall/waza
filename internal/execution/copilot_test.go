@@ -286,6 +286,35 @@ func TestPathsOverlap_UsesFilesystemIdentity(t *testing.T) {
 	require.True(t, pathsOverlap(first, alias))
 }
 
+func TestValidateSandboxPathPolicy_WorkspaceSkillOverlap(t *testing.T) {
+	root := newSandboxTestRoot(t)
+	workspace := filepath.Join(root, "workspace")
+	skill := filepath.Join(workspace, "skill")
+	sibling := filepath.Join(root, "sibling")
+	require.NoError(t, os.MkdirAll(skill, 0o755))
+	require.NoError(t, os.Mkdir(sibling, 0o755))
+
+	for _, tc := range []struct {
+		name    string
+		skill   string
+		wantErr bool
+	}{
+		{name: "same directory", skill: workspace, wantErr: true},
+		{name: "skill within workspace", skill: skill, wantErr: true},
+		{name: "workspace within skill", skill: root, wantErr: true},
+		{name: "separate skill", skill: sibling},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSandboxPathPolicy(workspace, []string{tc.skill}, models.SandboxConfig{Enabled: true})
+			if tc.wantErr {
+				require.ErrorContains(t, err, "overlaps declared skill directory")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestPathsOverlap_IsCaseInsensitiveWhenFilesystemIs(t *testing.T) {
 	root := newSandboxTestRoot(t)
 	mixedCase := filepath.Join(root, "MixedCase")

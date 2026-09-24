@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -18,15 +20,15 @@ import (
 
 // SharedClientOptions configures a lazily-constructed process-wide Copilot SDK
 // client returned by [SharedClient]. Clients are shared by startup-compatibility
-// key; within each key, only the first call wins and subsequent calls receive
-// the already-built client regardless of options.
+// key, including the effective environment and authentication for sandboxed
+// clients. Within each key, the first LogLevel wins.
 type SharedClientOptions struct {
 	// LogLevel passed through to the underlying copilot.Client. Defaults to
 	// "error" when blank.
 	LogLevel string
 	// CLIArgs passed through to the underlying copilot.Client. Calls with the
-	// same CLIArgs share one process; calls with different CLIArgs get separate
-	// processes because CLIArgs are startup-only.
+	// same CLIArgs and compatible environment share one process; calls with
+	// different CLIArgs get separate processes because CLIArgs are startup-only.
 	CLIArgs []string
 	// SanitizeEnvironment gives the Copilot CLI process only the operational
 	// variables needed by a sandboxed evaluation. It is part of the client key
@@ -75,7 +77,7 @@ func SharedClient(opts SharedClientOptions) CopilotClient {
 	if sharedClosed {
 		return &startupErrorClient{err: errSharedClientClosed}
 	}
-	if client := sharedClients[key]; client != nil {
+	if client := sharedClients[key]; !opts.SanitizeEnvironment && client != nil {
 		return client
 	}
 
@@ -86,8 +88,28 @@ func SharedClient(opts SharedClientOptions) CopilotClient {
 	clientOptions, err := sharedClientOptions(logLevel, opts.CLIArgs, opts.SanitizeEnvironment)
 	if err != nil {
 		slog.Warn("Copilot CLI path resolution failed; refusing PATH fallback", "error", err)
-		sharedClients[key] = &startupErrorClient{err: err}
-		return sharedClients[key]
+		client := &startupErrorClient{err: err}
+		if !opts.SanitizeEnvironment {
+			sharedClients[key] = client
+		}
+		return client
+	}
+	if opts.SanitizeEnvironment {
+		conn, ok := clientOptions.Connection.(copilot.StdioConnection)
+		if !ok {
+			err := fmt.Errorf("sandboxed shared client requires a stdio connection, got %T", clientOptions.Connection)
+			slog.Error("invalid sandboxed Copilot client configuration", "error", err)
+			return &startupErrorClient{err: err}
+		}
+		environ := slices.Clone(conn.Env)
+		slices.Sort(environ)
+		// Hash the exact startup snapshot passed to the SDK, never raw secrets
+		// or a second read of the host environment.
+		fingerprint := sha256.Sum256(fmt.Appendf(nil, "%q\x00%q\x00%q", conn.Path, environ, clientOptions.GitHubToken))
+		key += fmt.Sprintf("\x00%x", fingerprint)
+		if client := sharedClients[key]; client != nil {
+			return client
+		}
 	}
 	sharedClients[key] = sharedConstruct(clientOptions)
 	return sharedClients[key]

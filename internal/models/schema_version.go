@@ -27,7 +27,7 @@ const (
 	//       migration.
 	// 1.3 — additive: Config.sandbox opts Copilot SDK evaluations into native
 	//       command isolation. The field is optional, so older artifacts retain
-	//       their existing execution behaviour.
+	//       their existing execution behavior.
 	CurrentSchemaVersion = "1.3"
 )
 

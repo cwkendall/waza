@@ -155,6 +155,8 @@ Waza derives filesystem permissions from existing declarations: the fresh task w
 
 Copilot applies the OS sandbox to model-visible shell commands and local MCP/LSP subprocesses; the bundled Copilot CLI 1.0.80 enforces the configured filesystem and network policy for in-process built-in file and URL tools. Waza delegates permission requests for those built-in operations and configured custom or MCP tools, while rejecting unsupported Copilot control-plane capabilities and unknown request types. Model-backed prompt graders retain the task sandbox. Remote MCP servers and trusted post-execution program graders remain separate trust boundaries; program-grader commands run with host permissions. Copilot local sandboxing is in public preview; Windows currently requires a Windows Insiders build.
 
+Sandboxed evaluations share a Copilot CLI process only when their startup arguments, CLI path, allowlisted environment, and authentication token match. Changing the home directory, proxy, or token starts a separate client. The compatibility key fingerprints environment and authentication values rather than storing raw secrets.
+
 ### Trigger-precision evals
 
 Set `inject_skill_body: false` when the eval is measuring whether the agent invokes a skill rather than whether it can complete the work after already seeing the skill body:

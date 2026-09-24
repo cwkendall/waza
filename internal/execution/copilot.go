@@ -872,7 +872,11 @@ func captureWorkspaceFiles(dir string) map[string][]byte {
 	if err != nil {
 		return files
 	}
-	defer root.Close()
+	defer func() {
+		if err := root.Close(); err != nil {
+			slog.Warn("closing captured workspace", "path", dir, "error", err)
+		}
+	}()
 	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -988,6 +992,11 @@ func validateSandboxPathPolicy(workspaceDir string, skillDirs []string, config m
 		}
 	}
 	if workspaceDir != "" {
+		for _, skillDir := range skillDirs {
+			if pathsOverlap(workspaceDir, skillDir) {
+				return fmt.Errorf("sandbox workspace %q overlaps declared skill directory %q", workspaceDir, skillDir)
+			}
+		}
 		for _, readonlyPath := range config.ReadonlyPaths {
 			if pathsOverlap(workspaceDir, readonlyPath) {
 				return fmt.Errorf("sandbox workspace %q overlaps read-only path %q", workspaceDir, readonlyPath)
@@ -1080,36 +1089,36 @@ func sessionSandboxConfiguration(workspaceDir string, readonlyDirs []string, con
 	}
 
 	return &rpc.SessionUpdateOptionsParams{
-		SandboxConfig: &rpc.SandboxConfig{
-			Enabled:                    true,
-			AddCurrentWorkingDirectory: copilot.Bool(false),
-			AllowDevToolAccess:         copilot.Bool(config.AllowDevToolCaches),
-			Auth: &rpc.SandboxConfigAuth{
-				Gh:  copilot.Bool(config.GHAuth),
-				Git: copilot.Bool(config.GitAuth),
-			},
-			UserPolicy: &rpc.SandboxConfigUserPolicy{
-				Filesystem: &rpc.SandboxConfigUserPolicyFilesystem{
-					ClearPolicyOnExit: copilot.Bool(true),
-					DeniedPaths:       deniedTempDirs,
-					ReadonlyPaths:     readonlyPaths,
-					ReadwritePaths:    readwritePaths,
+			SandboxConfig: &rpc.SandboxConfig{
+				Enabled:                    true,
+				AddCurrentWorkingDirectory: copilot.Bool(false),
+				AllowDevToolAccess:         copilot.Bool(config.AllowDevToolCaches),
+				Auth: &rpc.SandboxConfigAuth{
+					Gh:  copilot.Bool(config.GHAuth),
+					Git: copilot.Bool(config.GitAuth),
 				},
-				Network: &rpc.SandboxConfigUserPolicyNetwork{
-					AllowLocalNetwork: copilot.Bool(config.AllowLocalNetwork),
-					AllowOutbound:     copilot.Bool(config.AllowOutboundNetwork),
+				UserPolicy: &rpc.SandboxConfigUserPolicy{
+					Filesystem: &rpc.SandboxConfigUserPolicyFilesystem{
+						ClearPolicyOnExit: copilot.Bool(true),
+						DeniedPaths:       deniedTempDirs,
+						ReadonlyPaths:     readonlyPaths,
+						ReadwritePaths:    readwritePaths,
+					},
+					Network: &rpc.SandboxConfigUserPolicyNetwork{
+						AllowLocalNetwork: copilot.Bool(config.AllowLocalNetwork),
+						AllowOutbound:     copilot.Bool(config.AllowOutboundNetwork),
+					},
+					Seatbelt: &rpc.SandboxConfigUserPolicySeatbelt{KeychainAccess: copilot.Bool(false)},
 				},
-				Seatbelt: &rpc.SandboxConfigUserPolicySeatbelt{KeychainAccess: copilot.Bool(false)},
 			},
-		},
-	}, &rpc.PermissionsConfigureParams{
-		Paths: &rpc.PermissionPathsConfig{
-			AdditionalDirectories: additionalDirectories,
-			WorkspacePath:         &workspaceDir,
-			IncludeTempDirectory:  copilot.Bool(false),
-			Unrestricted:          copilot.Bool(false),
-		},
-	}, nil
+		}, &rpc.PermissionsConfigureParams{
+			Paths: &rpc.PermissionPathsConfig{
+				AdditionalDirectories: additionalDirectories,
+				WorkspacePath:         &workspaceDir,
+				IncludeTempDirectory:  copilot.Bool(false),
+				Unrestricted:          copilot.Bool(false),
+			},
+		}, nil
 }
 
 // streamingPtr converts the caller's bool Streaming field into the *bool the

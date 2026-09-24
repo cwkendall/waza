@@ -3,6 +3,7 @@ package graders
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,11 @@ func (dg *diffGrader) Grade(ctx context.Context, gradingContext *Context) (*mode
 			if err != nil {
 				return nil, fmt.Errorf("opening workspace for diff grading: %w", err)
 			}
-			defer root.Close()
+			defer func() {
+				if err := root.Close(); err != nil {
+					slog.WarnContext(ctx, "closing diff grader workspace", "path", workspaceDir, "error", err)
+				}
+			}()
 			workspaceRoot = root
 		}
 

@@ -566,7 +566,7 @@ func TestCopilotEngineBuilder_CLIArgsEmptyWhenCustomProvider(t *testing.T) {
 	require.True(t, ok, "Connection must be a copilot.StdioConnection")
 	require.Empty(t, conn.Args,
 		"Connection.Args must be empty when a custom BYOK provider is configured so the embedded CLI does not pre-validate a provider-only model ID against the GitHub Copilot catalog (#305)")
-	require.NotNil(t, conn.Env, "custom client factories must receive the same sanitised CLI environment as shared clients")
+	require.NotNil(t, conn.Env, "custom client factories must receive the same sanitized CLI environment as shared clients")
 	for _, entry := range conn.Env {
 		require.False(t, strings.HasPrefix(entry, "COPILOT_API_KEY="), "BYOK credentials must be passed per session, not inherited by model-visible tools")
 	}
