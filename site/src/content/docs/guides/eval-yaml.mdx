@@ -157,6 +157,10 @@ Copilot applies the OS sandbox to model-visible shell commands and local MCP/LSP
 
 Sandboxed evaluations share a Copilot CLI process only when their startup arguments, CLI path, allowlisted environment, and authentication token match. Changing the home directory, proxy, or token starts a separate client. The compatibility key fingerprints environment and authentication values rather than storing raw secrets.
 
+Sandboxed suggestion analysis grants access and copies resources only from resolved skill directories containing `SKILL.md`, not their discovery parents or unrelated eval-directory files. If sandbox setup fails, Waza disconnects and deletes the affected session, including resumed sessions, and reports any cleanup failure. With `enabled: false`, optional sandbox paths are not resolved, and caching treats the block like an omitted sandbox policy.
+
+Sandbox setup verifies the running CLI version through the SDK and requires 1.0.80 or newer for native URL enforcement. Older or unverifiable versions fail closed, including `COPILOT_CLI_PATH` overrides. Upgrade the overridden CLI or unset `COPILOT_CLI_PATH` to use Waza's bundled runtime.
+
 ### Trigger-precision evals
 
 Set `inject_skill_body: false` when the eval is measuring whether the agent invokes a skill rather than whether it can complete the work after already seeing the skill body:

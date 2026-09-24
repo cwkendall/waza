@@ -67,18 +67,20 @@ Eval authors use `skill_directories`, `inputs.files`, and Git resources as the s
 
 Waza passes declared skill directories to Copilot's native skill loader and grants those same canonical paths read-only access. This lets invoked skills run bundled scripts relative to their own `SKILL.md` without copying the skill or creating a second discovery convention. On Windows, Copilot local sandboxing currently requires a Windows Insiders build.
 
+Sandboxed suggestion analysis limits both native skill grants and copied resources to resolved directories containing `SKILL.md`. Discovery roots, including the eval directory and skill collection parents, do not grant access to neighboring files unless they are themselves skill directories.
+
 Sandboxed task workspaces live under the operating system's user-cache directory while the executor is running. This keeps them outside the denied system temp root. Waza retains a workspace through follow-up turns and grading because existing file, diff, and program graders consume its path, then removes it during normal executor shutdown. `--keep-workspace` remains the explicit debugging opt-in. A process crash can leave a stale cache directory; it does not widen the sandbox policy for another task.
 
 The optional flags and path lists expose only capabilities that an eval may genuinely require. Their zero values are the safe, hermetic defaults. Sandbox bypass requests are always rejected because Waza runs non-interactively and cannot obtain informed human approval for an unsandboxed command. Requests that managed policy marks as requiring explicit human approval are also rejected.
 
 The runner passes the eval sandbox configuration and resolved skill directories to the Copilot executor. After session creation or resume, the executor:
 
-1. updates the session's native sandbox options;
+1. verifies that the running CLI reports version 1.0.80 or newer, including when `COPILOT_CLI_PATH` overrides the bundled CLI, then updates the session's native sandbox options;
 2. configures Copilot's path-permission manager with the task workspace and declared skills;
 3. delegates permission requests only for sandbox-governed built-in operations and configured custom or MCP tools, rejecting sandbox bypass, interactive managed-policy approval, unsupported control-plane capabilities, and unknown request types; and
-4. fails the task closed if Copilot policy configuration fails.
+4. fails the task closed if Copilot policy configuration fails, disconnecting and deleting the affected session even when it was resumed. Cleanup uses an independent bounded context, and cleanup failures are included in the returned error.
 
-An omitted or disabled `sandbox` block sends no sandbox configuration RPC and uses the existing Copilot client process configuration. The field itself still requires schema 1.3 and the `copilot-sdk` executor, including when disabled. Waza therefore never weakens a sandbox policy inherited from Copilot or an organisation and does not change existing evaluations that omit the block.
+An omitted or disabled `sandbox` block sends no sandbox configuration RPC and uses the existing Copilot client process configuration. Disabled path lists are not resolved for execution or caching, and a disabled block has the same cache key contribution as an omitted block. The field itself still requires schema 1.3 and the `copilot-sdk` executor, including when disabled. Waza therefore never weakens a sandbox policy inherited from Copilot or an organisation and does not change existing evaluations that omit the block.
 
 ## Copilot process environment
 

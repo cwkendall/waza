@@ -289,6 +289,61 @@ func TestCopilotEngine_Execute_DisabledSandboxLeavesInheritedPolicyUnchanged(t *
 	require.Equal(t, "unsandboxed-session", resp.SessionID)
 }
 
+func TestCopilotEngine_Execute_RetiresResumedSessionAfterSandboxFailure(t *testing.T) {
+	for name, cleanupFails := range map[string]bool{"cleanup succeeds": false, "cleanup fails": true} {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			clientMock := newClientMock(ctrl)
+			sessionMock := NewMockCopilotSession(ctrl)
+			sandbox := models.SandboxConfig{Enabled: true}
+			configureErr := errors.New("sandbox unavailable")
+			var disconnectErr, deleteErr error
+			if cleanupFails {
+				disconnectErr = errors.New("disconnect failed")
+				deleteErr = errors.New("delete failed")
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			clientMock.EXPECT().ResumeSessionWithOptions(gomock.Any(), "existing-session", gomock.Any()).
+				Return(sessionMock, nil)
+			sessionMock.EXPECT().SessionID().Return("existing-session")
+			sessionMock.EXPECT().ConfigureSandbox(gomock.Any(), gomock.Any(), gomock.Any(), sandbox).
+				DoAndReturn(func(context.Context, string, []string, models.SandboxConfig) error {
+					cancel()
+					return configureErr
+				})
+			gomock.InOrder(
+				sessionMock.EXPECT().Disconnect().Return(disconnectErr),
+				clientMock.EXPECT().DeleteSession(gomock.Any(), "existing-session").
+					DoAndReturn(func(deleteCtx context.Context, _ string) error {
+						require.NoError(t, deleteCtx.Err())
+						_, bounded := deleteCtx.Deadline()
+						require.True(t, bounded)
+						return deleteErr
+					}),
+			)
+
+			engine := NewCopilotEngineBuilder("test-model", &CopilotEngineBuilderOptions{
+				NewCopilotClient:    func(*copilot.ClientOptions) CopilotClient { return clientMock },
+				SanitizeEnvironment: true,
+			}).Build()
+			require.NoError(t, engine.Initialize(t.Context()))
+			t.Cleanup(func() { require.NoError(t, engine.Shutdown(context.Background())) })
+
+			resp, err := engine.Execute(ctx, &ExecutionRequest{
+				Message: "hello", SessionID: "existing-session", Sandbox: &sandbox,
+			})
+			require.Nil(t, resp)
+			require.ErrorIs(t, err, configureErr)
+			if cleanupFails {
+				require.ErrorIs(t, err, disconnectErr)
+				require.ErrorIs(t, err, deleteErr)
+			}
+		})
+	}
+}
+
 func TestCopilotEngine_Execute_SendError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	clientMock := newClientMock(ctrl)

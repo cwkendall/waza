@@ -58,9 +58,9 @@ func CacheKey(spec *models.EvalSpec, task *models.TestCase, fixtureDir string) (
 	if err := writeInt(h, spec.Config.MaxAttempts); err != nil {
 		return "", err
 	}
-	resolvedSandbox := spec.Config.Sandbox
-	if resolvedSandbox != nil {
-		resolved, err := resolvedSandbox.ResolvePaths()
+	var resolvedSandbox *models.SandboxConfig
+	if sandbox := spec.Config.Sandbox; sandbox != nil && sandbox.Enabled {
+		resolved, err := sandbox.ResolvePaths()
 		if err != nil {
 			return "", fmt.Errorf("resolving sandbox configuration: %w", err)
 		}

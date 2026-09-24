@@ -109,6 +109,53 @@ func TestGenerateEvalAnalysis_PropagatesSandbox(t *testing.T) {
 	require.Equal(t, "analysis", report)
 	require.NotNil(t, engine.request)
 	require.Same(t, sandbox, engine.request.Sandbox)
+	require.Empty(t, engine.request.SkillPaths)
+	require.Empty(t, engine.request.Resources)
+}
+
+func TestGenerateEvalAnalysis_SandboxExcludesDiscoveryRoots(t *testing.T) {
+	root := t.TempDir()
+	specDir := filepath.Join(root, "evals")
+	skillRoot := filepath.Join(root, "skills")
+	skillDir := filepath.Join(skillRoot, "my-skill")
+	require.NoError(t, os.MkdirAll(specDir, 0o755))
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(specDir, "private.txt"), []byte("eval neighbor"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillRoot, "private.txt"), []byte("skill neighbor"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# My Skill"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "helper.txt"), []byte("skill helper"), 0o644))
+
+	for name, sandbox := range map[string]*models.SandboxConfig{
+		"enabled":  {Enabled: true},
+		"disabled": {},
+		"omitted":  nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := &models.EvalSpec{
+				SkillName: "my-skill",
+				Config: models.Config{
+					EngineType: "copilot-sdk", SkillPaths: []string{skillRoot}, Sandbox: sandbox,
+				},
+			}
+			engine := &analysisCapturingEngine{}
+			_, err := generateEvalAnalysis(t.Context(), engine, spec, filepath.Join(specDir, "eval.yaml"),
+				&models.EvaluationOutcome{},
+				[]models.TriggerResult{{Prompt: "trigger", ShouldTrigger: true}},
+			)
+			require.NoError(t, err)
+			require.NotNil(t, engine.request)
+			if sandbox != nil && sandbox.Enabled {
+				require.Equal(t, []string{skillDir}, engine.request.SkillPaths)
+				require.ElementsMatch(t, []execution.ResourceFile{
+					{Path: "SKILL.md", Content: []byte("# My Skill")},
+					{Path: "helper.txt", Content: []byte("skill helper")},
+				}, engine.request.Resources)
+			} else {
+				require.Contains(t, engine.request.SkillPaths, specDir)
+				require.Contains(t, engine.request.SkillPaths, skillRoot)
+			}
+		})
+	}
 }
 
 type analysisCapturingEngine struct {

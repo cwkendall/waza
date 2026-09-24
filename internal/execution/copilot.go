@@ -486,11 +486,8 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 			configureErr := fmt.Errorf("failed to configure Copilot sandbox: %w", err)
 			disconnectErr := session.Disconnect()
 			sessionCleaned = true
-			if req.SessionID != "" {
-				return nil, errors.Join(configureErr, disconnectErr)
-			}
-			// A newly created session that never acquired its requested sandbox
-			// policy must not remain resumable with a weaker policy.
+			// A session that failed to acquire its requested sandbox policy
+			// must not remain resumable with a weaker policy.
 			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 30*time.Second)
 			deleteErr := e.client.DeleteSession(deleteCtx, sessionID)
 			cancelDelete()
