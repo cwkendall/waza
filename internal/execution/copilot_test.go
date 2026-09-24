@@ -208,6 +208,7 @@ func TestResolveSandboxPaths_ExpandsHomeAndEnvironment(t *testing.T) {
 	require.NoError(t, os.WriteFile(readonlyPath, []byte("certificate"), 0o644))
 	require.NoError(t, os.MkdirAll(readwritePath, 0o755))
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("WAZA_SANDBOX_READONLY", readonlyPath)
 
 	config, err := resolveSandboxPaths(models.SandboxConfig{
