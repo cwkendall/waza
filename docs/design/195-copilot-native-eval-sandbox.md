@@ -4,7 +4,7 @@
 
 Waza evaluations run model-selected commands and bundled skill scripts without an interactive operator approving each action. A permission callback alone does not prevent a command from reading unrelated host files, modifying files outside the task workspace, inheriting host secrets, or reaching the network. This makes an otherwise disposable evaluation capable of affecting or exposing the machine that launched it.
 
-The required boundary is task-specific: the model needs read/write access to one fresh workspace, read-only access to declared skills, and no other capability unless the eval explicitly opts in. Waza must provide that boundary without creating and maintaining its own macOS, Linux, and Windows sandbox engines.
+The required boundary is task-specific: the model needs read/write access to one fresh workspace, read-only access to the selected target skill and explicitly required skill dependencies, and no other capability unless the eval explicitly opts in. Waza must provide that boundary without creating and maintaining its own macOS, Linux, and Windows sandbox engines.
 
 ## Decision
 
@@ -65,7 +65,7 @@ When enabled, Waza derives filesystem access from existing eval declarations:
 
 Eval authors use `skill_directories`, `inputs.files`, and Git resources as the single source of truth for evaluated content. Optional `readonly_paths` and `readwrite_paths` exist only for declared host prerequisites that Copilot cannot materialise, such as a package cache or enterprise CA bundle. Values must be absolute after `~` and environment-variable expansion; references to unset or empty variables and paths that do not exist fail validation. Waza resolves symlinks before granting access and rejects paths that overlap the system temp root or receive both read-only and read/write grants. The lists default to empty and never replace the workspace or skill permissions.
 
-Waza passes declared skill directories to Copilot's native skill loader and grants those same canonical paths read-only access. This lets invoked skills run bundled scripts relative to their own `SKILL.md` without copying the skill or creating a second discovery convention. On Windows, Copilot local sandboxing currently requires a Windows Insiders build.
+Waza treats declared `skill_directories` as discovery roots, resolves the selected target and `required_skills` with the same SKILL.md/agent discovery semantics used by execution, and passes only those concrete canonical directories to Copilot's native skill loader and read-only sandbox policy. This lets invoked skills run bundled scripts relative to their own definitions without exposing undeclared siblings or unrelated discovery-root contents. On Windows, Copilot local sandboxing currently requires a Windows Insiders build.
 
 Sandboxed suggestion analysis limits both native skill grants and copied resources to resolved directories containing `SKILL.md`. Discovery roots, including the eval directory and skill collection parents, do not grant access to neighboring files unless they are themselves skill directories.
 

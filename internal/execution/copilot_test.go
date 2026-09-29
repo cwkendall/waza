@@ -391,8 +391,20 @@ func TestCopilotNoSessionID(t *testing.T) {
 	unregister := func() { unregisterCount++ }
 
 	sourceDir := t.TempDir()
-	skillDir := newSandboxTestRoot(t)
+	skillRoot := newSandboxTestRoot(t)
+	skillDir := filepath.Join(skillRoot, "target")
+	dependencyDir := filepath.Join(skillRoot, "dependency")
+	siblingDir := filepath.Join(skillRoot, "sibling")
+	require.NoError(t, os.Mkdir(skillDir, 0o755))
+	require.NoError(t, os.Mkdir(dependencyDir, 0o755))
+	require.NoError(t, os.Mkdir(siblingDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: target\ndescription: target\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dependencyDir, "SKILL.md"), []byte("---\nname: dependency\ndescription: dependency\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(siblingDir, "SKILL.md"), []byte("---\nname: sibling\ndescription: sibling\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillRoot, "private.txt"), []byte("not granted"), 0o644))
 	sandbox := models.SandboxConfig{Enabled: true}
+	grantedSkillDirs := []string{skillDir, dependencyDir}
+	expectedSystemMsg := buildSkillSystemMessage(grantedSkillDirs, "target", true)
 
 	expectedConfig := sessionConfigMatcher{
 		t:         t,
@@ -401,12 +413,16 @@ func TestCopilotNoSessionID(t *testing.T) {
 			OnPermissionRequest: allowAllTools,
 			Model:               expectedModel,
 			ReasoningEffort:     "high",
-			SkillDirectories:    []string{skillDir},
+			SkillDirectories:    grantedSkillDirs,
+			SystemMessage: &copilot.SystemMessageConfig{
+				Mode:    "append",
+				Content: expectedSystemMsg,
+			},
 		},
 	}
 
 	clientMock.EXPECT().CreateSession(gomock.Any(), expectedConfig).Return(sessionMock, nil)
-	sessionMock.EXPECT().ConfigureSandbox(gomock.Any(), gomock.Any(), []string{skillDir}, sandbox).Return(nil)
+	sessionMock.EXPECT().ConfigureSandbox(gomock.Any(), gomock.Any(), grantedSkillDirs, sandbox).Return(nil)
 	sessionMock.EXPECT().Disconnect()
 	clientMock.EXPECT().DeleteSession(gomock.Any(), "session-1")
 
@@ -436,7 +452,9 @@ func TestCopilotNoSessionID(t *testing.T) {
 		ReasoningEffort: "high",
 		SessionID:       "", // ie, create a new session each time
 		SourceDir:       sourceDir,
-		SkillPaths:      []string{skillDir},
+		SkillName:       "target",
+		RequiredSkills:  []string{"dependency"},
+		SkillPaths:      []string{skillRoot},
 		Sandbox:         &sandbox,
 	})
 	require.NoError(t, err)
@@ -445,6 +463,30 @@ func TestCopilotNoSessionID(t *testing.T) {
 	require.True(t, resp.Success)
 	require.Equal(t, "this-model-wins", resp.ModelID)
 	require.Equal(t, 1, unregisterCount) // only slog handler is unsubscribed; events collector stays alive for shutdown
+}
+
+func TestResolveSandboxSkillDirs_SelectsNamedAgentDirectory(t *testing.T) {
+	root := newSandboxTestRoot(t)
+	targetDir := filepath.Join(root, "target-agent")
+	siblingDir := filepath.Join(root, "sibling-agent")
+	require.NoError(t, os.Mkdir(targetDir, 0o755))
+	require.NoError(t, os.Mkdir(siblingDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(targetDir, "target.agent.md"), []byte("---\nname: target-agent\ndescription: target\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(siblingDir, "sibling.agent.md"), []byte("---\nname: sibling-agent\ndescription: sibling\n---\n"), 0o644))
+
+	dirs, err := resolveSandboxSkillDirs([]string{root}, "target-agent", nil)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{targetDir}, dirs)
+}
+
+func TestResolveSandboxSkillDirs_MissingSelectedSkillFailsClosed(t *testing.T) {
+	root := newSandboxTestRoot(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private.txt"), []byte("not granted"), 0o644))
+
+	_, err := resolveSandboxSkillDirs([]string{root}, "missing", nil)
+
+	require.ErrorContains(t, err, "skills not found in declared skill discovery roots: missing")
 }
 
 func TestCopilotResumeSessionID(t *testing.T) {
@@ -456,6 +498,7 @@ func TestCopilotResumeSessionID(t *testing.T) {
 	sourceDir, err := os.Getwd()
 	require.NoError(t, err)
 	skillDir := newSandboxTestRoot(t)
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: resume-skill\ndescription: resume\n---\n"), 0o644))
 	sandbox := models.SandboxConfig{Enabled: true}
 
 	expectedConfig := sessionConfigMatcher{
@@ -495,11 +538,13 @@ func TestCopilotResumeSessionID(t *testing.T) {
 	require.NoError(t, err)
 
 	resp, err := engine.Execute(ctx, &ExecutionRequest{
-		Message:         "hello?",
-		SessionID:       "session-1",
-		ReasoningEffort: "high",
-		SkillPaths:      []string{skillDir},
-		Sandbox:         &sandbox,
+		Message:           "hello?",
+		SessionID:         "session-1",
+		ReasoningEffort:   "high",
+		SkillName:         "resume-skill",
+		SuppressSkillBody: true,
+		SkillPaths:        []string{skillDir},
+		Sandbox:           &sandbox,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "session-1", resp.SessionID)

@@ -184,10 +184,15 @@ func (r *Runner) testTrigger(ctx context.Context, prompt string) (*execution.Exe
 	defer cancel()
 	skillPaths := utils.ResolvePaths(spec.Config.FilteredSkillPaths(), r.cfg.SpecDir())
 	effectiveSkillDirs := append([]string{r.cfg.SpecDir()}, skillPaths...)
+	requestSkillPaths := skillPaths
+	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled && r.cfg.SpecDir() != "" {
+		requestSkillPaths = append([]string{r.cfg.SpecDir()}, skillPaths...)
+	}
 	return r.engine.Execute(execCtx, &execution.ExecutionRequest{
 		Message:           prompt,
 		SkillName:         r.spec.Skill,
-		SkillPaths:        skillPaths,
+		RequiredSkills:    append([]string(nil), spec.Config.RequiredSkills...),
+		SkillPaths:        requestSkillPaths,
 		NoSkills:          spec.Config.AllSkillsDisabled(),
 		SuppressSkillBody: !spec.Config.ShouldInjectSkillBody(),
 		TriggerSkillRouting: spec.Config.ShouldTriggerSkillRouting() &&

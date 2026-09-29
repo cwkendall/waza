@@ -804,14 +804,9 @@ func (r *EvalRunner) validateRequiredSkills() error {
 		return fmt.Errorf("required_skills specified but no skill_directories configured")
 	}
 
-	// Discover skills in the specified directories
-	discoveredSkills, err := discoverSkills(resolvedPaths)
+	// Resolve required skills with the same discovery semantics used by execution.
+	_, err := execution.ResolveSkillDirectories(resolvedPaths, spec.Config.RequiredSkills)
 	if err != nil {
-		return fmt.Errorf("discovering skills: %w", err)
-	}
-
-	// Validate that all required skills were found
-	if err := validateRequiredSkills(spec.Config.RequiredSkills, discoveredSkills, resolvedPaths); err != nil {
 		return fmt.Errorf("skill validation failed:\n%w", err)
 	}
 
@@ -1518,6 +1513,7 @@ func (r *EvalRunner) buildExecutionRequest(tc *models.TestCase) (*execution.Exec
 		WorkDir:           tc.Stimulus.WorkDir,
 		Instructions:      instructions,
 		SkillName:         spec.SkillName,
+		RequiredSkills:    append([]string(nil), spec.Config.RequiredSkills...),
 		TaskName:          tc.DisplayName,
 		TaskDescription:   tc.Summary,
 		SkillPaths:        resolvedSkillPaths,

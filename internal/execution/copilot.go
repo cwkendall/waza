@@ -414,14 +414,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 	var systemMessageParts []string
 	if !req.NoSkills {
 		if sandbox != nil && sandbox.Enabled {
-			// A sandboxed evaluation exposes only explicitly declared skills. The
-			// process launch directory must not become an implicit host read path.
-			skillDirs = make([]string, len(req.SkillPaths))
-			for i, skillDir := range req.SkillPaths {
-				skillDirs[i], err = canonicalSandboxPath(skillDir)
-				if err != nil {
-					return nil, fmt.Errorf("resolving declared skill directory %q: %w", skillDir, err)
-				}
+			skillDirs, err = resolveSandboxSkillDirs(req.SkillPaths, req.SkillName, req.RequiredSkills)
+			if err != nil {
+				return nil, err
 			}
 		} else {
 			skillDirs = e.getSkillDirs(sourceDir, req)
@@ -1198,6 +1193,55 @@ func buildSkillSystemMessage(skillDirs []string, skillName string, injectSkillBo
 // effective skill directories passed to the engine.
 func IsSkillAvailable(skillDirs []string, skillName string) bool {
 	return findSkillDefinition(skillDirs, skillName) != nil
+}
+
+func resolveSandboxSkillDirs(searchRoots []string, skillName string, requiredSkills []string) ([]string, error) {
+	names := make([]string, 0, 1+len(requiredSkills))
+	if skillName != "" {
+		names = append(names, skillName)
+	}
+	names = append(names, requiredSkills...)
+
+	dirs, err := ResolveSkillDirectories(searchRoots, names)
+	if err != nil {
+		return nil, fmt.Errorf("resolving sandbox skills: %w", err)
+	}
+	return dirs, nil
+}
+
+// ResolveSkillDirectories resolves selected skill and agent names to their
+// concrete canonical directories beneath the supplied discovery roots.
+func ResolveSkillDirectories(searchRoots, names []string) ([]string, error) {
+	seenNames := make(map[string]bool, len(names))
+	seenDirs := make(map[string]bool, len(names))
+	dirs := make([]string, 0, len(names))
+	var missing []string
+	for _, name := range names {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || seenNames[key] {
+			continue
+		}
+		seenNames[key] = true
+
+		definition := findSkillDefinition(searchRoots, name)
+		if definition == nil {
+			missing = append(missing, name)
+			continue
+		}
+		dir, err := canonicalSandboxPath(definition.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolving skill %q directory %q: %w", name, definition.Dir, err)
+		}
+		if seenDirs[dir] {
+			continue
+		}
+		seenDirs[dir] = true
+		dirs = append(dirs, dir)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("skills not found in declared skill discovery roots: %s", strings.Join(missing, ", "))
+	}
+	return dirs, nil
 }
 
 func findSkillDefinition(skillDirs []string, skillName string) *skillDefinition {

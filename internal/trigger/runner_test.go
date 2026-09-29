@@ -176,9 +176,7 @@ func TestEvalRunnerRunConfig(t *testing.T) {
 	deadline, ok := engine.LastDeadline()
 	require.True(t, ok, "expected trigger timeout as context deadline")
 	require.WithinDuration(t, start.Add(120*time.Second), deadline, time.Second)
-	if len(engine.LastReq().SkillPaths) != 2 {
-		t.Errorf("SkillPaths = %v, want 2 entries", engine.LastReq().SkillPaths)
-	}
+	require.Equal(t, []string{specDir, filepath.Join(specDir, "skills/a"), filepath.Join(specDir, "skills/b")}, engine.LastReq().SkillPaths)
 	require.True(t, engine.LastReq().SuppressSkillBody)
 	require.Same(t, sandbox, engine.LastReq().Sandbox)
 	require.True(t, engine.LastReq().TriggerSkillRouting)
