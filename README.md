@@ -44,7 +44,7 @@ go build -o waza ./cmd/waza
 ./waza <waza command line>
 ```
 
-Waza bundles the GitHub Copilot CLI used by the `copilot-sdk` executor and extracts it to the local user cache on first use. Set `COPILOT_CLI_PATH` only when you need to force a specific Copilot CLI binary.
+Waza bundles the GitHub Copilot CLI used by the `copilot-sdk` executor and extracts it and its runtime assets to a versioned directory in the local user cache on first use (or under `COPILOT_HOME/cache` when set). Set `COPILOT_CLI_PATH` only when you need to force a specific Copilot CLI binary. Installation failures are reported without falling back to a CLI on `PATH`; set `COPILOT_CLI_INSTALL_VERBOSE=1` for installation diagnostics.
 
 ### Azure Developer CLI (azd) Extension
 
@@ -732,6 +732,8 @@ Use an LLM to analyze `SKILL.md` and generate suggested evaluation artifacts.
 
 Each generated task entry carries a `confidence` score in `[0, 1]` and a `rationale` string pointing to the SKILL.md span it was derived from. Both appear in dry-run output but are kept outside the written task YAML (the task schema rejects unknown fields).
 
+Before writing files, `--apply` derives a missing or blank string `name` from the task `id` (for example, `summarize-document` becomes `Summarize Document`). Explicit nonblank names are preserved. Null and other invalid name values still fail task schema validation; dry-run output is unchanged.
+
 `--apply` is merge-safe: an existing `eval.yaml` is never overwritten (new task files are picked up by its existing `tasks:` glob), and existing task files (by path or by task `id`) cause `--apply` to fail with a diff unless `--force` is also passed. Existing fixture files are also preserved unless `--force` is set.
 
 **Examples:**
@@ -955,6 +957,10 @@ waza session view session-2025-06-15.ndjson
 
 Waza can automatically upload evaluation results to Azure Blob Storage for team collaboration and historical tracking.
 
+Waza pins Azure Blob requests to service version `2026-10-06` to avoid the
+[azblob v1.8.1 rollout issue](https://github.com/Azure/azure-sdk-for-go/releases/tag/sdk/storage/azblob/v1.8.1)
+that can cause `400 InvalidHeaderValue` with the SDK's newer default.
+
 ### Configuration
 
 Add a `storage:` section to your `.waza.yaml`:
@@ -1068,8 +1074,11 @@ config:
   max_attempts: 3          # Retry failed graders up to 3 times (default: 1, no retries)
   timeout_seconds: 300
   parallel: false
-  executor: mock          # or copilot-sdk
+  executor: copilot-sdk   # required when using reasoning_effort/judge_reasoning_effort
   model: claude-sonnet-4-20250514
+  reasoning_effort: high  # Optional; copilot-sdk task/responder sessions only
+  judge_model: gpt-5-mini
+  judge_reasoning_effort: low # Optional default for prompt graders
   group_by: model          # Group results by model (or other dimension)
   instruction_files:
     - .github/instructions/project.instructions.md
@@ -1157,6 +1166,10 @@ tasks:
 # tasks_from: ./test-cases.csv
 # range: [1, 10]  # Only include rows 1-10 (0-indexed, skips header)
 ```
+
+Pin `reasoning_effort` and `judge_reasoning_effort` to `low`, `medium`, `high`, `xhigh`, or `max` when benchmarking model-and-effort combinations. Both settings require `executor: copilot-sdk`. Omit either setting to preserve the Copilot SDK/model default. A `prompt` grader can override the judge default with `graders[].config.reasoning_effort`, including task/checkpoint graders and graders with `continue_session: true`, which resume the task session with the overridden or default judge effort. Agent effort remains eval-level, not per-task.
+
+With explicit effort, choose a concrete model from `waza models`. Waza checks the runtime's supported-effort metadata before creating or resuming hosted Copilot sessions; unknown models, unavailable metadata, and unsupported efforts produce actionable errors instead of silently using a different effort. Custom-provider efforts are forwarded directly because the hosted catalog does not describe those models. Result setup metadata and cache keys include both eval-level effort settings; regrading replaces the judge effort, including clearing a previously pinned value when omitted.
 
 `schemaVersion` uses `MAJOR.MINOR` format. Missing values are interpreted as the current schema version (currently `1.3`). Readers allow same-major minor additions with warnings for unknown fields, but reject different majors with a hint to run `waza migrate <file>`.
 
@@ -1274,7 +1287,20 @@ config:
 
 Waza grants read/write access to each fresh task workspace and read-only access to the resolved `skill_directories`, which Copilot loads through its native skill mechanism. Bundled skill scripts remain executable without copying or making the source writable. Fixtures and Git resources are materialised inside the workspace. Other host paths, all valid temporary roots declared through `TMPDIR`, `TEMP`, or `TMP`, and sandbox bypass requests are denied. The optional capability flags default to `false`. Optional `readonly_paths` and `readwrite_paths` accept absolute paths, `~`, and environment-variable expansion for declared host prerequisites such as package caches or CA bundles; both default to empty. Paths must exist, are canonicalised before use, cannot overlap a denied temporary root, and cannot receive conflicting read-only and read/write grants. Enable only access required by the evaluation. Omitting `sandbox` preserves the existing session policy and process environment; `enabled: false` likewise sends no policy-changing RPC. Sandboxed Copilot CLI processes receive an explicit operational environment allowlist rather than arbitrary host variables. Invalid temporary-directory environment values and proxy URLs that contain credentials are omitted. GitHub tokens are passed through the SDK authentication channel, with persisted login as the fallback.
 
-Copilot applies the OS sandbox to model-visible shell commands and local MCP/LSP subprocesses; the bundled Copilot CLI 1.0.80 enforces the configured filesystem and network policy for in-process built-in file and URL tools. Waza delegates permission requests for those built-in operations and configured custom or MCP tools, while rejecting unsupported Copilot control-plane capabilities and unknown request types. Model-backed prompt graders retain the task sandbox. Remote MCP servers and trusted post-execution program graders remain separate trust boundaries; program-grader commands run with host permissions. Copilot local sandboxing is a public-preview feature; on Windows it currently requires a Windows Insiders build.
+Copilot applies the OS sandbox to model-visible shell commands and local MCP/LSP subprocesses; the bundled Copilot CLI 1.0.85 enforces the configured filesystem and network policy for in-process built-in file and URL tools. Waza delegates permission requests for those built-in operations and configured custom or MCP tools, while rejecting unsupported Copilot control-plane capabilities and unknown request types. Model-backed prompt graders retain the task sandbox. Remote MCP servers and trusted post-execution program graders remain separate trust boundaries; program-grader commands run with host permissions. Copilot local sandboxing is a public-preview feature; on Windows it currently requires a Windows Insiders build.
+
+### Trigger skill routing
+
+For trigger-precision evals where fluent model answers can mask skipped skill routing, opt into the scoped routing control:
+
+```yaml
+skill: xyz
+config:
+  inject_skill_body: false
+  trigger_skill_routing: true
+```
+`trigger_skill_routing` only has an effect when `inject_skill_body: false`; it adds an eval-only instruction to invoke the target skill when the task is in scope, without injecting the skill body or changing ordinary evaluation behavior.
+`trigger_skill_routing` only has an effect when `inject_skill_body: false`; it adds an eval-only instruction to invoke the target skill when the task is in scope, without injecting the skill body or changing ordinary evaluation behavior.
 
 ### CSV Dataset Support
 

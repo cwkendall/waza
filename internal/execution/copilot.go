@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -315,6 +316,37 @@ func (e *CopilotEngine) ListModels(ctx context.Context) ([]copilot.ModelInfo, er
 	return e.client.ListModels(ctx)
 }
 
+func (e *CopilotEngine) validateReasoningEffort(ctx context.Context, modelID, effort string) error {
+	if effort == "" || e.provider.enabled() {
+		return nil
+	}
+	if modelID == "" || modelID == "auto" {
+		return fmt.Errorf("reasoning effort %q requires an explicit model; select one with waza models", effort)
+	}
+	models, err := e.client.ListModels(ctx)
+	if err != nil {
+		return fmt.Errorf("checking reasoning effort %q for model %q: %w", effort, modelID, err)
+	}
+	for _, model := range models {
+		if model.ID != modelID {
+			continue
+		}
+		if !model.Capabilities.Supports.ReasoningEffort {
+			return fmt.Errorf("model %q does not support reasoning effort; omit reasoning_effort or select a supporting model with waza models", modelID)
+		}
+		if len(model.SupportedReasoningEfforts) == 0 {
+			return fmt.Errorf("model %q has no supported reasoning effort metadata; omit reasoning_effort or update the Copilot runtime", modelID)
+		}
+		for _, supported := range model.SupportedReasoningEfforts {
+			if supported == effort {
+				return nil
+			}
+		}
+		return fmt.Errorf("model %q does not support reasoning effort %q; choose one of %s", modelID, effort, strings.Join(model.SupportedReasoningEfforts, ", "))
+	}
+	return fmt.Errorf("cannot verify reasoning effort for unknown model %q; select a model with waza models or omit reasoning_effort", modelID)
+}
+
 // Execute runs a test with Copilot SDK
 func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*ExecutionResponse, error) {
 	if req == nil {
@@ -338,6 +370,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.validateReasoningEffort(ctx, modelID, req.ReasoningEffort); err != nil {
 		return nil, err
 	}
 
@@ -394,6 +429,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 		if msg := buildSkillSystemMessage(skillDirs, req.SkillName, !req.SuppressSkillBody); msg != "" {
 			systemMessageParts = append(systemMessageParts, msg)
 		}
+		if msg := buildTriggerSkillRoutingSystemMessage(req.SkillName, req.TriggerSkillRouting && req.SuppressSkillBody); msg != "" {
+			systemMessageParts = append(systemMessageParts, msg)
+		}
 	}
 	if sandbox != nil && sandbox.Enabled {
 		if err := validateSandboxPathPolicy(workspaceDir, skillDirs, *sandbox); err != nil {
@@ -423,8 +461,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 	if req.SessionID == "" {
 		// Create session with updated API
 		session, err = e.client.CreateSession(ctx, &copilot.SessionConfig{
-			Model: modelID,
-			Tools: req.Tools,
+			Model:           modelID,
+			ReasoningEffort: req.ReasoningEffort,
+			Tools:           req.Tools,
 
 			OnPermissionRequest: permRequestCallback,
 
@@ -441,8 +480,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 		}
 	} else {
 		session, err = e.client.ResumeSessionWithOptions(ctx, req.SessionID, &copilot.ResumeSessionConfig{
-			Model: modelID,
-			Tools: req.Tools,
+			Model:           modelID,
+			ReasoningEffort: req.ReasoningEffort,
+			Tools:           req.Tools,
 
 			OnPermissionRequest: permRequestCallback,
 
@@ -1135,17 +1175,43 @@ type skillDefinition struct {
 	Dir         string
 }
 
-func discoverSkillDefinitions(skillDirs []string) []skillDefinition {
-	var skills []skillDefinition
+// buildSkillSystemMessage scans skill directories for SKILL.md files and returns
+// a system message that injects the target skill's full definition when
+// injectSkillBody is true and a skill matching skillName is found.
+//
+// It intentionally does NOT emit a synthetic <available_skills> inventory:
+// the Copilot SDK already advertises the skills passed via SkillDirectories
+// with correctly-parsed metadata, so a second waza-authored inventory would
+// duplicate that content. See #578.
+func buildSkillSystemMessage(skillDirs []string, skillName string, injectSkillBody bool) string {
+	if !injectSkillBody || skillName == "" {
+		return ""
+	}
 
+	if sd := findSkillDefinition(skillDirs, skillName); sd != nil {
+		return skillContextBlock(sd.Content)
+	}
+	return ""
+}
+
+// IsSkillAvailable reports whether the target skill can be discovered from the
+// effective skill directories passed to the engine.
+func IsSkillAvailable(skillDirs []string, skillName string) bool {
+	return findSkillDefinition(skillDirs, skillName) != nil
+}
+
+func findSkillDefinition(skillDirs []string, skillName string) *skillDefinition {
+	if skillName == "" {
+		return nil
+	}
 	for _, dir := range skillDirs {
-		// Check direct SKILL.md in this directory
 		if sd := loadSkillDefinition(dir); sd != nil {
-			skills = append(skills, *sd)
+			if strings.EqualFold(sd.Name, skillName) {
+				return sd
+			}
 			continue
 		}
 
-		// Walk one level of subdirectories to find nested skills
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -1154,36 +1220,16 @@ func discoverSkillDefinitions(skillDirs []string) []skillDefinition {
 			if !entry.IsDir() {
 				continue
 			}
-			// Skip hidden dirs, node_modules, vendor
 			name := entry.Name()
 			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
 				continue
 			}
-			if sd := loadSkillDefinition(filepath.Join(dir, name)); sd != nil {
-				skills = append(skills, *sd)
+			if sd := loadSkillDefinition(filepath.Join(dir, name)); sd != nil && strings.EqualFold(sd.Name, skillName) {
+				return sd
 			}
 		}
 	}
-	return skills
-}
-
-// buildSkillSystemMessage scans skill directories for SKILL.md files and returns
-// a system message that injects the target skill's full definition when
-// injectSkillBody is true and a skill matching skillName is found.
-//
-// It intentionally does NOT emit a synthetic <available_skills> inventory:
-// the Copilot SDK already advertises the skills passed via SkillDirectories.
-func buildSkillSystemMessage(skillDirs []string, skillName string, injectSkillBody bool) string {
-	if !injectSkillBody || skillName == "" {
-		return ""
-	}
-
-	for _, skill := range discoverSkillDefinitions(skillDirs) {
-		if strings.EqualFold(skill.Name, skillName) {
-			return skillContextBlock(skill.Content)
-		}
-	}
-	return ""
+	return nil
 }
 
 func skillContextBlock(content string) string {
@@ -1191,6 +1237,22 @@ func skillContextBlock(content string) string {
 	sb.WriteString("\n<skill_context>\n")
 	sb.WriteString(content)
 	sb.WriteString("\n</skill_context>\n")
+	return sb.String()
+}
+
+func buildTriggerSkillRoutingSystemMessage(skillName string, enabled bool) string {
+	if !enabled || skillName == "" {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n<skill_routing_control>\n")
+	sb.WriteString("This evaluation measures trigger precision for the target skill ")
+	sb.WriteString(strconv.Quote(skillName))
+	sb.WriteString(". Before answering, decide whether the user's task falls within that target skill's scope based on the skills made available by the runtime. ")
+	sb.WriteString("If it does, invoke that skill with the skill tool and then follow the skill. ")
+	sb.WriteString("If it does not, do not invoke the target skill; answer normally or ask a clarifying question as appropriate.\n")
+	sb.WriteString("</skill_routing_control>\n")
 	return sb.String()
 }
 
