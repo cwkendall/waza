@@ -182,11 +182,17 @@ func (r *Runner) testTrigger(ctx context.Context, prompt string) (*execution.Exe
 	}
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
-	skillPaths := utils.ResolvePaths(spec.Config.FilteredSkillPaths(), r.cfg.SpecDir())
-	effectiveSkillDirs := append([]string{r.cfg.SpecDir()}, skillPaths...)
+	specDir := r.cfg.SpecDir()
+	filteredSkillPaths := spec.Config.FilteredSkillPaths()
+	skillPaths := utils.ResolvePaths(filteredSkillPaths, specDir)
+	specDirBlocked := utils.IsFilteredPath(specDir, spec.Config.SkillPaths, filteredSkillPaths, specDir)
+	effectiveSkillDirs := append([]string(nil), skillPaths...)
+	if specDir != "" && !specDirBlocked {
+		effectiveSkillDirs = append([]string{specDir}, effectiveSkillDirs...)
+	}
 	requestSkillPaths := skillPaths
-	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled && r.cfg.SpecDir() != "" {
-		requestSkillPaths = append([]string{r.cfg.SpecDir()}, skillPaths...)
+	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled && specDir != "" && !specDirBlocked {
+		requestSkillPaths = append([]string{specDir}, skillPaths...)
 	}
 	return r.engine.Execute(execCtx, &execution.ExecutionRequest{
 		Message:           prompt,

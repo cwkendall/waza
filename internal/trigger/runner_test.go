@@ -224,6 +224,68 @@ func TestEvalRunnerRunConfig_DisabledTargetDoesNotRoute(t *testing.T) {
 	require.Equal(t, otherDir, engine.LastReq().SkillPaths[0])
 }
 
+func TestEvalRunnerRunConfig_SandboxSpecDirFiltering(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		configureSpecDir bool
+		disableSpecDir   bool
+		wantSkillPaths   bool
+		wantRouting      bool
+	}{
+		{
+			name:             "explicit disabled spec dir is blocked",
+			configureSpecDir: true,
+			disableSpecDir:   true,
+		},
+		{
+			name:           "implicit spec dir remains available",
+			wantSkillPaths: true,
+			wantRouting:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			injectSkillBody := false
+			specDir := t.TempDir()
+			require.NoError(t, os.WriteFile(
+				filepath.Join(specDir, "SKILL.md"),
+				[]byte("---\nname: my-skill\ndescription: test\n---\n"),
+				0o644,
+			))
+			configModel := models.Config{
+				InjectSkillBody:     &injectSkillBody,
+				TriggerSkillRouting: true,
+				Sandbox:             &models.SandboxConfig{Enabled: true},
+			}
+			if tc.configureSpecDir {
+				configModel.SkillPaths = []string{specDir}
+			}
+			if tc.disableSpecDir {
+				configModel.DisabledSkills = []string{filepath.Base(specDir)}
+			}
+			spec := &TestSpec{
+				Skill:                "my-skill",
+				ShouldTriggerPrompts: []TestPrompt{{Prompt: "hello"}},
+			}
+			engine := &capturingEngine{}
+			cfg := config.NewEvalConfig(
+				&models.EvalSpec{SkillName: "my-skill", Config: configModel},
+				config.WithSpecDir(specDir),
+			)
+
+			_, err := NewRunner(spec, engine, cfg, nil).Run(t.Context())
+
+			require.NoError(t, err)
+			require.NotNil(t, engine.LastReq())
+			if tc.wantSkillPaths {
+				require.Equal(t, []string{specDir}, engine.LastReq().SkillPaths)
+			} else {
+				require.Empty(t, engine.LastReq().SkillPaths)
+			}
+			require.Equal(t, tc.wantRouting, engine.LastReq().TriggerSkillRouting)
+		})
+	}
+}
+
 type capturingEngine struct {
 	mu           sync.Mutex
 	lastReq      *execution.ExecutionRequest

@@ -158,33 +158,22 @@ func resolveSuggestionSkillPaths(spec *models.EvalSpec, specPath string) ([]stri
 	}
 
 	specDir := filepath.Dir(specPath)
-	allConfiguredRoots := utils.ResolvePaths(spec.Config.SkillPaths, specDir)
-	configuredRoots := utils.ResolvePaths(spec.Config.FilteredSkillPaths(), specDir)
-	allowedConfiguredRoots := make(map[string]bool, len(configuredRoots))
-	for _, root := range configuredRoots {
-		allowedConfiguredRoots[filepath.Clean(root)] = true
-	}
-	blockedRoots := make(map[string]bool)
-	for _, root := range allConfiguredRoots {
-		cleanRoot := filepath.Clean(root)
-		if !allowedConfiguredRoots[cleanRoot] {
-			blockedRoots[cleanRoot] = true
-		}
-	}
+	filteredSkillPaths := spec.Config.FilteredSkillPaths()
+	configuredRoots := utils.ResolvePaths(filteredSkillPaths, specDir)
 
 	discoveryRoots := append([]string(nil), configuredRoots...)
-	if !blockedRoots[filepath.Clean(specDir)] {
+	if !utils.IsFilteredPath(specDir, spec.Config.SkillPaths, filteredSkillPaths, specDir) {
 		discoveryRoots = append(discoveryRoots, specDir)
 	}
 	if parent := filepath.Dir(specDir); parent != "" {
 		conventionalRoot := filepath.Join(parent, "skills")
-		if !blockedRoots[filepath.Clean(conventionalRoot)] {
+		if !utils.IsFilteredPath(conventionalRoot, spec.Config.SkillPaths, filteredSkillPaths, specDir) {
 			discoveryRoots = append(discoveryRoots, conventionalRoot)
 		}
 	}
 
 	paths := append([]string(nil), configuredRoots...)
-	if !blockedRoots[filepath.Clean(specDir)] {
+	if !utils.IsFilteredPath(specDir, spec.Config.SkillPaths, filteredSkillPaths, specDir) {
 		paths = append(paths, specDir)
 	}
 	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled {
