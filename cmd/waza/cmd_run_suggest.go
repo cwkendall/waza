@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/microsoft/waza/internal/dataset"
 	"github.com/microsoft/waza/internal/execution"
 	"github.com/microsoft/waza/internal/models"
+	"github.com/microsoft/waza/internal/safeio"
 	"github.com/microsoft/waza/internal/template"
 	"github.com/microsoft/waza/internal/transcript"
 	"github.com/microsoft/waza/internal/utils"
@@ -73,7 +75,10 @@ func generateEvalAnalysis(
 		return generateFakeSuggestionReport(spec, len(failingTests), len(failedTriggers)), nil
 	}
 
-	resources := loadSkillResources(resolvedSkillPaths)
+	resources, err := loadSkillResources(resolvedSkillPaths)
+	if err != nil {
+		return "", fmt.Errorf("loading skill resources: %w", err)
+	}
 	prompt := buildRunAnalysisPrompt(spec, failingTests, failedTriggers, testDefinitions)
 	execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	res, err := engine.Execute(execCtx, &execution.ExecutionRequest{
@@ -204,23 +209,29 @@ const maxResourceFileSize = 100 * 1024 // 100 KB
 // loadSkillResources walks each directory in paths and returns all text files
 // as ResourceFile entries so they can be placed in the suggestion engine's
 // workspace. Binary and oversized files are skipped.
-func loadSkillResources(paths []string) []execution.ResourceFile {
+func loadSkillResources(paths []string) ([]execution.ResourceFile, error) {
 	seen := make(map[string]bool)
 	var resources []execution.ResourceFile
 
 	for _, dir := range paths {
-		info, err := os.Stat(dir)
-		if err != nil || !info.IsDir() {
+		root, err := safeio.OpenRoot(dir)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			return nil, fmt.Errorf("opening skill resource root %q: %w", dir, err)
+		}
 
-		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		walkErr := fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil // skip unreadable entries
+				return err
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
 			}
 			if d.IsDir() {
 				name := d.Name()
-				if strings.HasPrefix(name, ".") || name == "node_modules" {
+				if path != "." && (strings.HasPrefix(name, ".") || name == "node_modules") {
 					return filepath.SkipDir
 				}
 				return nil
@@ -230,23 +241,23 @@ func loadSkillResources(paths []string) []execution.ResourceFile {
 				return nil
 			}
 
-			fi, err := d.Info()
-			if err != nil || fi.Size() > maxResourceFileSize || fi.Size() == 0 {
+			content, fi, err := root.ReadRegularFile(path, maxResourceFileSize)
+			if errors.Is(err, safeio.ErrFileTooLarge) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if fi.Size() == 0 {
 				return nil
 			}
 
-			rel, err := filepath.Rel(dir, path)
-			if err != nil || rel == "." {
+			if path == "." {
 				return nil
 			}
 			// Use forward slashes for consistent workspace paths.
-			rel = filepath.ToSlash(rel)
+			rel := filepath.ToSlash(path)
 			if seen[rel] {
-				return nil
-			}
-
-			content, err := os.ReadFile(path)
-			if err != nil {
 				return nil
 			}
 
@@ -257,8 +268,15 @@ func loadSkillResources(paths []string) []execution.ResourceFile {
 			})
 			return nil
 		})
+		closeErr := root.Close()
+		if walkErr != nil {
+			return nil, fmt.Errorf("walking skill resource root %q: %w", dir, walkErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("closing skill resource root %q: %w", dir, closeErr)
+		}
 	}
-	return resources
+	return resources, nil
 }
 
 // isTextFile returns true if the file extension looks like a text file that

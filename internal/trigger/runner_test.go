@@ -387,9 +387,25 @@ func TestEvalRunnerSkipsHiddenAndVendorInFixtures(t *testing.T) {
 	require.NoError(t, os.MkdirAll(vendor, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(vendor, "dep.go"), []byte("skip"), 0644))
 
-	resources := loadFixtureDir(fixtureDir)
+	resources, err := loadFixtureDir(fixtureDir)
+	require.NoError(t, err)
 	require.Len(t, resources, 1)
 	require.Equal(t, "visible.txt", resources[0].Path)
+}
+
+func TestLoadFixtureDir_RejectsSymlinkEscapes(t *testing.T) {
+	fixtureDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fixtureDir, "visible.txt"), []byte("safe"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(outsideDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "nested", "secret.txt"), []byte("nested secret"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(fixtureDir, "secret.txt")))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "nested"), filepath.Join(fixtureDir, "linked-dir")))
+
+	resources, err := loadFixtureDir(fixtureDir)
+	require.NoError(t, err)
+	require.Equal(t, []execution.ResourceFile{{Path: "visible.txt", Content: []byte("safe")}}, resources)
 }
 
 func TestEvalRunnerPassesMCPServers(t *testing.T) {
@@ -425,9 +441,17 @@ func TestEvalRunnerPassesMCPServers(t *testing.T) {
 }
 
 func TestLoadFixtureDir_EmptyDir(t *testing.T) {
-	require.Nil(t, loadFixtureDir(""))
-	require.Nil(t, loadFixtureDir("/nonexistent/path"))
-	require.Nil(t, loadFixtureDir(t.TempDir())) // empty dir
+	resources, err := loadFixtureDir("")
+	require.NoError(t, err)
+	require.Nil(t, resources)
+
+	resources, err = loadFixtureDir("/nonexistent/path")
+	require.NoError(t, err)
+	require.Nil(t, resources)
+
+	resources, err = loadFixtureDir(t.TempDir())
+	require.NoError(t, err)
+	require.Nil(t, resources)
 }
 
 func TestConvertMCPServers_SkipsNonMapEntries(t *testing.T) {

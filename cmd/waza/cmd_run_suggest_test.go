@@ -517,7 +517,8 @@ func TestLoadSkillResources_LoadsTextFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "graders", "check.py"), []byte("print('ok')"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "eval.yaml"), []byte("name: test"), 0o644))
 
-	resources := loadSkillResources([]string{dir})
+	resources, err := loadSkillResources([]string{dir})
+	require.NoError(t, err)
 
 	paths := make(map[string]string)
 	for _, r := range resources {
@@ -536,7 +537,8 @@ func TestLoadSkillResources_SkipsBinaryAndHiddenDirs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("git"), 0o644))
 
-	resources := loadSkillResources([]string{dir})
+	resources, err := loadSkillResources([]string{dir})
+	require.NoError(t, err)
 
 	paths := make(map[string]bool)
 	for _, r := range resources {
@@ -554,7 +556,8 @@ func TestLoadSkillResources_DeduplicatesAcrossPaths(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir1, "SKILL.md"), []byte("first"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir2, "SKILL.md"), []byte("second"), 0o644))
 
-	resources := loadSkillResources([]string{dir1, dir2})
+	resources, err := loadSkillResources([]string{dir1, dir2})
+	require.NoError(t, err)
 
 	count := 0
 	for _, r := range resources {
@@ -567,13 +570,30 @@ func TestLoadSkillResources_DeduplicatesAcrossPaths(t *testing.T) {
 }
 
 func TestLoadSkillResources_SkipsNonexistentPaths(t *testing.T) {
-	resources := loadSkillResources([]string{"/nonexistent/path"})
+	resources, err := loadSkillResources([]string{"/nonexistent/path"})
+	require.NoError(t, err)
 	assert.Empty(t, resources)
 }
 
 func TestLoadSkillResources_EmptyPaths(t *testing.T) {
-	resources := loadSkillResources(nil)
+	resources, err := loadSkillResources(nil)
+	require.NoError(t, err)
 	assert.Empty(t, resources)
+}
+
+func TestLoadSkillResources_RejectsSymlinkEscapes(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("safe"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(outside, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "nested", "secret.md"), []byte("nested secret"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "secret.txt")))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "nested"), filepath.Join(dir, "linked-dir")))
+
+	resources, err := loadSkillResources([]string{dir})
+	require.NoError(t, err)
+	require.Equal(t, []execution.ResourceFile{{Path: "SKILL.md", Content: []byte("safe")}}, resources)
 }
 
 func TestIsTextFile(t *testing.T) {

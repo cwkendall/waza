@@ -23,6 +23,7 @@ import (
 	"github.com/microsoft/waza/internal/hooks"
 	"github.com/microsoft/waza/internal/models"
 	"github.com/microsoft/waza/internal/responder"
+	"github.com/microsoft/waza/internal/safeio"
 	"github.com/microsoft/waza/internal/snapshot"
 	"github.com/microsoft/waza/internal/telemetry"
 	"github.com/microsoft/waza/internal/template"
@@ -1475,7 +1476,11 @@ func (r *EvalRunner) buildExecutionRequest(tc *models.TestCase) (*execution.Exec
 	if err != nil {
 		return nil, err
 	}
-	resources = append(resources, r.loadResources(tc)...)
+	taskResources, err := r.loadResources(tc)
+	if err != nil {
+		return nil, err
+	}
+	resources = append(resources, taskResources...)
 	instructions, instructionResources, err := r.loadInstructionFiles(tc)
 	if err != nil {
 		return nil, err
@@ -1778,7 +1783,7 @@ func (r *EvalRunner) sendResponderReply(ctx context.Context, tc *models.TestCase
 	return true
 }
 
-func (r *EvalRunner) loadResources(tc *models.TestCase) []execution.ResourceFile {
+func (r *EvalRunner) loadResources(tc *models.TestCase) ([]execution.ResourceFile, error) {
 	var resources []execution.ResourceFile
 
 	// Determine fixture directory (for loading resource files)
@@ -1786,6 +1791,16 @@ func (r *EvalRunner) loadResources(tc *models.TestCase) []execution.ResourceFile
 	if tc.ContextRoot != "" {
 		fixtureDir = tc.ContextRoot
 	}
+
+	var root *safeio.Root
+	var err error
+	defer func() {
+		if root != nil {
+			if err := root.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to close fixture directory %s: %v\n", fixtureDir, err)
+			}
+		}
+	}()
 
 	for _, ref := range tc.Stimulus.Resources {
 		if ref.Body != "" {
@@ -1807,30 +1822,16 @@ func (r *EvalRunner) loadResources(tc *models.TestCase) []execution.ResourceFile
 				continue
 			}
 
-			fullPath := filepath.Join(fixtureDir, cleanPath)
-
-			// Ensure the resolved path is still within fixtureDir
-			absFixtureDir, err := filepath.Abs(fixtureDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to get absolute path for fixture dir: %v\n", err)
-				continue
+			if root == nil {
+				root, err = safeio.OpenRoot(fixtureDir)
+				if err != nil {
+					return nil, fmt.Errorf("opening fixture directory for resources: %w", err)
+				}
 			}
-
-			absFullPath, err := filepath.Abs(fullPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to get absolute path for resource: %v\n", err)
-				continue
-			}
-
-			if !strings.HasPrefix(absFullPath, absFixtureDir+string(filepath.Separator)) {
-				fmt.Fprintf(os.Stderr, "Warning: resource path %q escapes fixture directory\n", ref.Location)
-				continue
-			}
-
-			content, err := os.ReadFile(fullPath)
+			content, _, err := root.ReadRegularFile(cleanPath, 0)
 			if err != nil {
 				// Log error but continue - let the test fail if resource is critical
-				fmt.Fprintf(os.Stderr, "Warning: failed to load resource file %s: %v\n", fullPath, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to load resource file %s: %v\n", ref.Location, err)
 				continue
 			}
 			resources = append(resources, execution.ResourceFile{
@@ -1840,7 +1841,7 @@ func (r *EvalRunner) loadResources(tc *models.TestCase) []execution.ResourceFile
 		}
 	}
 
-	return resources
+	return resources, nil
 }
 
 func (r *EvalRunner) loadContextFixtureResources(tc *models.TestCase) ([]execution.ResourceFile, error) {
@@ -1968,15 +1969,25 @@ func (r *EvalRunner) loadInstructionFiles(tc *models.TestCase) ([]execution.Inst
 		return nil, nil, fmt.Errorf("instruction_files require a context/fixtures directory")
 	}
 
+	root, err := safeio.OpenRoot(fixtureDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening context directory for instruction_files: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			slog.Warn("closing instruction file context directory", "path", fixtureDir, "error", err)
+		}
+	}()
+
 	instructions := make([]execution.InstructionFile, 0, len(paths))
 	resources := make([]execution.ResourceFile, 0, len(paths))
 	for _, path := range paths {
-		cleanPath, fullPath, err := resolveContextFile(fixtureDir, path, "instruction_files")
+		cleanPath, err := resolveContextFile(path, "instruction_files")
 		if err != nil {
 			return nil, nil, err
 		}
 
-		content, err := os.ReadFile(fullPath)
+		content, _, err := root.ReadRegularFile(cleanPath, 0)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading instruction file %q: %w", path, err)
 		}
@@ -1994,37 +2005,23 @@ func (r *EvalRunner) loadInstructionFiles(tc *models.TestCase) ([]execution.Inst
 	return instructions, resources, nil
 }
 
-func resolveContextFile(baseDir, relPath, field string) (string, string, error) {
+func resolveContextFile(relPath, field string) (string, error) {
 	if relPath == "" {
-		return "", "", fmt.Errorf("%s path must not be empty", field)
+		return "", fmt.Errorf("%s path must not be empty", field)
 	}
 	if filepath.IsAbs(relPath) {
-		return "", "", fmt.Errorf("%s path %q must be relative", field, relPath)
+		return "", fmt.Errorf("%s path %q must be relative", field, relPath)
 	}
 	if containsPathTraversal(relPath) {
-		return "", "", fmt.Errorf("%s path %q must not contain path traversal", field, relPath)
+		return "", fmt.Errorf("%s path %q must not contain path traversal", field, relPath)
 	}
 
 	cleanPath := filepath.Clean(relPath)
 	if cleanPath == "." {
-		return "", "", fmt.Errorf("%s path must not be empty", field)
+		return "", fmt.Errorf("%s path must not be empty", field)
 	}
 
-	fullPath := filepath.Join(baseDir, cleanPath)
-	absBaseDir, err := filepath.Abs(baseDir)
-	if err != nil {
-		return "", "", fmt.Errorf("resolving context directory: %w", err)
-	}
-	absFullPath, err := filepath.Abs(fullPath)
-	if err != nil {
-		return "", "", fmt.Errorf("resolving %s path %q: %w", field, relPath, err)
-	}
-
-	if absFullPath != absBaseDir && !strings.HasPrefix(absFullPath, absBaseDir+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("%s path %q escapes context directory", field, relPath)
-	}
-
-	return cleanPath, fullPath, nil
+	return cleanPath, nil
 }
 
 func containsPathTraversal(path string) bool {

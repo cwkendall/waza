@@ -656,6 +656,9 @@ func TestBuildExecutionRequest_InstructionFilesUseTaskContextRoot(t *testing.T) 
 
 func TestBuildExecutionRequest_InstructionFileErrors(t *testing.T) {
 	fixtureDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.instructions.md"), []byte("secret"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(outsideDir, "secret.instructions.md"), filepath.Join(fixtureDir, "linked.instructions.md")))
 	spec := &models.EvalSpec{
 		SkillName: "test-skill",
 		Config: models.Config{
@@ -675,6 +678,7 @@ func TestBuildExecutionRequest_InstructionFileErrors(t *testing.T) {
 		{name: "missing", path: "missing.instructions.md", want: "reading instruction file"},
 		{name: "absolute", path: filepath.Join(fixtureDir, "absolute.instructions.md"), want: "must be relative"},
 		{name: "traversal", path: "../escape.instructions.md", want: "must not contain path traversal"},
+		{name: "symlink", path: "linked.instructions.md", want: "contains symlink"},
 	}
 
 	for _, tt := range tests {
