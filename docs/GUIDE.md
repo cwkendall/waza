@@ -533,7 +533,7 @@ Most evaluations need no additional path configuration. If a tool genuinely requ
 
 Omitting the block or setting `enabled: false` sends no sandbox configuration, so Waza does not override stronger Copilot or organisation policy and retains the existing process environment. Sandboxed Copilot CLI processes receive an explicit allowlisted environment. Credential-bearing proxy URLs are omitted. GitHub tokens are passed through the SDK's authentication channel, and persisted Copilot login remains available.
 
-Copilot applies this policy to model-visible shell commands and local MCP/LSP subprocesses; the bundled Copilot CLI 1.0.80 enforces the configured filesystem and network policy for in-process built-in file and URL tools. Waza delegates permission requests for those built-in operations and configured custom or MCP tools, while rejecting unsupported Copilot control-plane capabilities and unknown request types. Model-backed prompt graders retain the task sandbox. Remote MCP servers and trusted post-execution program graders remain separate trust boundaries; program-grader commands run with host permissions. Local sandboxing is a Copilot public-preview feature; Windows currently requires a Windows Insiders build.
+Copilot applies this policy to model-visible shell commands and local MCP/LSP subprocesses; the bundled Copilot CLI 1.0.85 enforces the configured filesystem and network policy for in-process built-in file and URL tools. Waza delegates permission requests for those built-in operations and configured custom or MCP tools, while rejecting unsupported Copilot control-plane capabilities and unknown request types. Model-backed prompt graders retain the task sandbox. Remote MCP servers and trusted post-execution program graders remain separate trust boundaries; program-grader commands run with host permissions. Local sandboxing is a Copilot public-preview feature; Windows currently requires a Windows Insiders build.
 
 See the [sandbox design](design/195-copilot-native-eval-sandbox.md) for the full boundary and its limitations.
 
@@ -697,6 +697,8 @@ Capture detailed session logs for debugging:
 ```bash
 waza run evals/code-explainer/eval.yaml --session-log --session-dir ./logs
 ```
+
+For custom agents evaluated with `copilot-sdk`, each `run_complete` log event includes the session digest's effective `tool_policy_mode` and any `tool_policy_denials`. The same fields are saved in results schema 1.3 and displayed in the dashboard trajectory view. Policies follow the selected agent and task-level skill paths, including resumed turns; omitted `tools:` is unrestricted, `tools: []` denies all tools, and populated lists allow only declared names and documented aliases. See the [custom agents guide](../site/src/content/docs/guides/custom-agents.mdx) for details and sandbox limitations.
 
 Logs are stored in NDJSON format (one event per line):
 ```json

@@ -60,11 +60,13 @@ func generateEvalAnalysis(
 		ctx = context.Background()
 	}
 
-	resolvedSkillPaths := resolveSuggestionSkillPaths(spec, specPath)
+	resolvedSkillPaths, err := resolveSuggestionSkillPaths(spec, specPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving suggestion skills: %w", err)
+	}
 
 	testDefinitions := map[string]string{}
 	if len(failingTests) > 0 {
-		var err error
 		testDefinitions, err = loadTestDefinitionYAML(spec, specPath)
 		if err != nil {
 			return "", fmt.Errorf("loading test definitions: %w", err)
@@ -82,10 +84,13 @@ func generateEvalAnalysis(
 	prompt := buildRunAnalysisPrompt(spec, failingTests, failedTriggers, testDefinitions)
 	execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	res, err := engine.Execute(execCtx, &execution.ExecutionRequest{
-		Message:    prompt,
-		SkillPaths: resolvedSkillPaths,
-		Resources:  resources,
-		Sandbox:    spec.Config.Sandbox,
+		Message:           prompt,
+		SkillName:         spec.SkillName,
+		RequiredSkills:    append([]string(nil), spec.Config.RequiredSkills...),
+		SkillPaths:        resolvedSkillPaths,
+		SuppressSkillBody: true,
+		Resources:         resources,
+		Sandbox:           spec.Config.Sandbox,
 	})
 	cancel()
 	if err != nil {
@@ -147,59 +152,48 @@ func generateFakeSuggestionReport(spec *models.EvalSpec, failedTests, failedTrig
 	return b.String()
 }
 
-func resolveSuggestionSkillPaths(spec *models.EvalSpec, specPath string) []string {
+func resolveSuggestionSkillPaths(spec *models.EvalSpec, specPath string) ([]string, error) {
 	specDir := filepath.Dir(specPath)
-	paths := utils.ResolvePaths(spec.Config.SkillPaths, specDir)
+	configuredRoots := utils.ResolvePaths(spec.Config.SkillPaths, specDir)
+	discoveryRoots := append([]string(nil), configuredRoots...)
+	discoveryRoots = append(discoveryRoots, specDir)
+	if parent := filepath.Dir(specDir); parent != "" {
+		discoveryRoots = append(discoveryRoots, filepath.Join(parent, "skills"))
+	}
+
+	paths := append([]string(nil), configuredRoots...)
 	paths = append(paths, specDir)
-	paths = append(paths, resolveEvaluatedSkillDirs(spec, specDir, paths)...)
+	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled {
+		paths = nil
+	}
+
+	names := make([]string, 0, 1+len(spec.Config.RequiredSkills))
+	names = append(names, spec.SkillName)
+	names = append(names, spec.Config.RequiredSkills...)
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		dir, found, err := execution.ResolveSkillDirectory(discoveryRoots, name)
+		if err != nil {
+			return nil, fmt.Errorf("resolving skill or agent %q: %w", name, err)
+		}
+		if found {
+			paths = append(paths, dir)
+		}
+	}
 	sort.Strings(paths)
 
 	seen := make(map[string]bool, len(paths))
 	unique := make([]string, 0, len(paths))
 	for _, p := range paths {
-		// Discovery roots must not become native sandbox grants or workspace copies.
-		if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled && !hasSkillFile(p) {
-			continue
-		}
 		if seen[p] {
 			continue
 		}
 		seen[p] = true
 		unique = append(unique, p)
 	}
-	return unique
-}
-
-func resolveEvaluatedSkillDirs(spec *models.EvalSpec, specDir string, resolvedPaths []string) []string {
-	if spec == nil || strings.TrimSpace(spec.SkillName) == "" {
-		return nil
-	}
-
-	dirs := make([]string, 0)
-	for _, base := range resolvedPaths {
-		candidate := filepath.Join(base, spec.SkillName)
-		if hasSkillFile(candidate) {
-			dirs = append(dirs, candidate)
-		}
-	}
-
-	parent := filepath.Dir(specDir)
-	if parent != "" {
-		candidate := filepath.Join(parent, "skills", spec.SkillName)
-		if hasSkillFile(candidate) {
-			dirs = append(dirs, candidate)
-		}
-	}
-
-	return dirs
-}
-
-func hasSkillFile(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
-	if err != nil {
-		return false
-	}
-	return !info.IsDir()
+	return unique, nil
 }
 
 // maxResourceFileSize is the maximum size of a single file loaded as a resource

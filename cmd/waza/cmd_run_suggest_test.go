@@ -27,7 +27,8 @@ func TestResolveSuggestionSkillPaths_DedupesAndSorts(t *testing.T) {
 		},
 	}
 
-	got := resolveSuggestionSkillPaths(spec, filepath.Join(parent, "eval.yaml"))
+	got, err := resolveSuggestionSkillPaths(spec, filepath.Join(parent, "eval.yaml"))
+	require.NoError(t, err)
 	require.Equal(t, []string{parent, a, b}, got)
 }
 
@@ -47,8 +48,34 @@ func TestResolveSuggestionSkillPaths_IncludesEvaluatedSkillDirectory(t *testing.
 		},
 	}
 
-	got := resolveSuggestionSkillPaths(spec, filepath.Join(specDir, "eval.yaml"))
-	assert.Contains(t, got, evaluatedSkillDir)
+	got, err := resolveSuggestionSkillPaths(spec, filepath.Join(specDir, "eval.yaml"))
+	require.NoError(t, err)
+	canonicalSkillDir, err := filepath.EvalSymlinks(evaluatedSkillDir)
+	require.NoError(t, err)
+	assert.Contains(t, got, canonicalSkillDir)
+}
+
+func TestResolveSuggestionSkillPaths_IncludesEvaluatedAgentDirectory(t *testing.T) {
+	agentDir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(agentDir, "reviewer.agent.md"),
+		[]byte("---\nname: reviewer\ndescription: Reviews code\n---\n"),
+		0o644,
+	))
+
+	spec := &models.EvalSpec{
+		SkillName: "reviewer",
+		Config: models.Config{
+			Sandbox: &models.SandboxConfig{Enabled: true},
+		},
+	}
+
+	got, err := resolveSuggestionSkillPaths(spec, filepath.Join(agentDir, "eval.yaml"))
+
+	require.NoError(t, err)
+	canonicalAgentDir, err := filepath.EvalSymlinks(agentDir)
+	require.NoError(t, err)
+	require.Equal(t, []string{canonicalAgentDir}, got)
 }
 
 func TestMaybeGenerateSuggestionReport_SkipsWhenNoFailures(t *testing.T) {
@@ -144,8 +171,12 @@ func TestGenerateEvalAnalysis_SandboxExcludesDiscoveryRoots(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.NotNil(t, engine.request)
+			require.Equal(t, spec.SkillName, engine.request.SkillName)
+			require.True(t, engine.request.SuppressSkillBody)
 			if sandbox != nil && sandbox.Enabled {
-				require.Equal(t, []string{skillDir}, engine.request.SkillPaths)
+				canonicalSkillDir, canonicalErr := filepath.EvalSymlinks(skillDir)
+				require.NoError(t, canonicalErr)
+				require.Equal(t, []string{canonicalSkillDir}, engine.request.SkillPaths)
 				require.ElementsMatch(t, []execution.ResourceFile{
 					{Path: "SKILL.md", Content: []byte("# My Skill")},
 					{Path: "helper.txt", Content: []byte("skill helper")},
@@ -156,6 +187,43 @@ func TestGenerateEvalAnalysis_SandboxExcludesDiscoveryRoots(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateEvalAnalysis_SandboxIncludesAgentTarget(t *testing.T) {
+	agentDir := t.TempDir()
+	agentContent := "---\nname: reviewer\ndescription: Reviews code\n---\nReview carefully.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "reviewer.agent.md"), []byte(agentContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "guide.txt"), []byte("agent guide"), 0o644))
+
+	spec := &models.EvalSpec{
+		SkillName: "reviewer",
+		Config: models.Config{
+			EngineType: "copilot-sdk",
+			Sandbox:    &models.SandboxConfig{Enabled: true},
+		},
+	}
+	engine := &analysisCapturingEngine{}
+
+	_, err := generateEvalAnalysis(
+		t.Context(),
+		engine,
+		spec,
+		filepath.Join(agentDir, "eval.yaml"),
+		&models.EvaluationOutcome{},
+		[]models.TriggerResult{{Prompt: "trigger", ShouldTrigger: true}},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, engine.request)
+	require.Equal(t, "reviewer", engine.request.SkillName)
+	require.True(t, engine.request.SuppressSkillBody)
+	canonicalAgentDir, err := filepath.EvalSymlinks(agentDir)
+	require.NoError(t, err)
+	require.Equal(t, []string{canonicalAgentDir}, engine.request.SkillPaths)
+	require.ElementsMatch(t, []execution.ResourceFile{
+		{Path: "reviewer.agent.md", Content: []byte(agentContent)},
+		{Path: "guide.txt", Content: []byte("agent guide")},
+	}, engine.request.Resources)
 }
 
 type analysisCapturingEngine struct {

@@ -26,8 +26,9 @@ const (
 	//       optional, so 1.0 and 1.1 artifacts continue to load without
 	//       migration.
 	// 1.3 — additive: Config.sandbox opts Copilot SDK evaluations into native
-	//       command isolation. The field is optional, so older artifacts retain
-	//       their existing execution behavior.
+	//       command isolation, and session_digest records tool_policy_mode and
+	//       tool_policy_denials (#585). These fields are optional, so older
+	//       artifacts retain their existing execution behavior.
 	CurrentSchemaVersion = "1.3"
 )
 

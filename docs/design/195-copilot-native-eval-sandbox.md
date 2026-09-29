@@ -96,7 +96,7 @@ Model-backed prompt-grader turns retain the evaluated task's sandbox configurati
 
 - Sandboxed Copilot CLI processes receive an allowlisted environment, but retained credential-free proxy and CA configuration remain visible to child tools.
 - Copilot applies the OS sandbox to local MCP and LSP subprocesses by default. Remote MCP servers are outside the local process boundary.
-- Copilot's built-in file and URL tools run in the CLI process. The bundled Copilot CLI 1.0.80 enforces the configured filesystem and network policy in application code, including redirect and cross-origin URL checks.
+- Copilot's built-in file and URL tools run in the CLI process. The bundled Copilot CLI 1.0.85 enforces the configured filesystem and network policy in application code, including redirect and cross-origin URL checks.
 - Prompt graders retain the task sandbox. Program graders run after agent execution with host permissions and remain an explicitly trusted extension boundary; sandboxing them requires a separate executor design.
 - Workspace capture excludes symlinks so post-run grading cannot follow a model-created link outside the task boundary.
 - The Copilot sandbox is a filesystem, network, and credential boundary; it does not impose CPU, memory, process-count, or output-size quotas. Run untrusted or adversarial evaluations inside an outer resource-limited environment.

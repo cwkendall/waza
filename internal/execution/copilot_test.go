@@ -489,6 +489,36 @@ func TestResolveSandboxSkillDirs_MissingSelectedSkillFailsClosed(t *testing.T) {
 	require.ErrorContains(t, err, "skills not found in declared skill discovery roots: missing")
 }
 
+func TestResolveSandboxSkillDirs_RejectsSymlinkedDefinitions(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		definitionName string
+		skillName      string
+	}{
+		{name: "skill", definitionName: "SKILL.md", skillName: "target"},
+		{name: "agent", definitionName: "target.agent.md", skillName: "target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newSandboxTestRoot(t)
+			targetDir := filepath.Join(root, "target")
+			outside := t.TempDir()
+			require.NoError(t, os.Mkdir(targetDir, 0o755))
+			outsideDefinition := filepath.Join(outside, tc.definitionName)
+			require.NoError(t, os.WriteFile(
+				outsideDefinition,
+				[]byte("---\nname: target\ndescription: outside\n---\n"),
+				0o644,
+			))
+			require.NoError(t, os.Symlink(outsideDefinition, filepath.Join(targetDir, tc.definitionName)))
+
+			_, err := resolveSandboxSkillDirs([]string{root}, tc.skillName, nil)
+
+			require.ErrorContains(t, err, "contains symlink")
+			require.ErrorContains(t, err, tc.definitionName)
+		})
+	}
+}
+
 func TestCopilotResumeSessionID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	clientMock := newClientMock(ctrl)
@@ -550,6 +580,184 @@ func TestCopilotResumeSessionID(t *testing.T) {
 	require.Equal(t, "session-1", resp.SessionID)
 	require.Empty(t, resp.ErrorMsg)
 	require.True(t, resp.Success)
+}
+
+func TestCopilotCreateSession_AppliesToolPolicyAvailableTools(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := newClientMock(ctrl)
+	sessionMock := NewMockCopilotSession(ctrl)
+
+	sourceDir := t.TempDir()
+
+	declared := []string{"read", "readFile"}
+	policy := NewToolPolicy(&declared)
+
+	var capturedConfig *copilot.SessionConfig
+	expectedConfig := sessionConfigMatcher{
+		t:         t,
+		sourceDir: sourceDir,
+		expected: copilot.SessionConfig{
+			OnPermissionRequest: allowAllTools, // presence-only check; real value is the policy wrapper
+			Model:               "gpt-4o-mini",
+			SkillDirectories:    []string{sourceDir},
+			AvailableTools:      []string{"builtin:view", "builtin:view"},
+			Hooks:               &copilot.SessionHooks{},
+		},
+	}
+
+	clientMock.EXPECT().CreateSession(gomock.Any(), expectedConfig).DoAndReturn(
+		func(_ context.Context, cfg *copilot.SessionConfig) (CopilotSession, error) {
+			capturedConfig = cfg
+			return sessionMock, nil
+		})
+	sessionMock.EXPECT().Disconnect()
+	clientMock.EXPECT().DeleteSession(gomock.Any(), "session-1")
+
+	sessionMock.EXPECT().On(gomock.Any()).Times(3).Return(func() {})
+	sessionMock.EXPECT().SendAndWait(gomock.Any(), gomock.Any()).Return(&copilot.SessionEvent{}, nil)
+	sessionMock.EXPECT().SessionID().Return("session-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	engine := NewCopilotEngineBuilder("gpt-4o-mini", &CopilotEngineBuilderOptions{
+		NewCopilotClient: func(clientOptions *copilot.ClientOptions) CopilotClient { return clientMock },
+	}).Build()
+	defer func() {
+		require.NoError(t, engine.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, engine.Initialize(ctx))
+
+	resp, err := engine.Execute(ctx, &ExecutionRequest{
+		Message:    "hello?",
+		SourceDir:  sourceDir,
+		ToolPolicy: policy,
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Success)
+	require.Equal(t, string(ToolPolicyAllowList), resp.ToolPolicyMode)
+	require.Empty(t, resp.ToolPolicyDenials)
+
+	require.NotNil(t, capturedConfig)
+	require.NotNil(t, capturedConfig.OnPermissionRequest)
+
+	// Exercise the wrapped OnPermissionRequest directly: a declared tool
+	// (read) is forwarded/approved, an undeclared one (bash) is rejected.
+	decision, err := capturedConfig.OnPermissionRequest(&copilot.PermissionRequestRead{Path: "/tmp/x"}, copilot.PermissionInvocation{})
+	require.NoError(t, err)
+	_, approved := decision.(*rpc.PermissionDecisionApproveOnce)
+	require.True(t, approved)
+
+	decision, err = capturedConfig.OnPermissionRequest(&copilot.PermissionRequestShell{FullCommandText: "ls"}, copilot.PermissionInvocation{})
+	require.NoError(t, err)
+	_, rejected := decision.(*rpc.PermissionDecisionReject)
+	require.True(t, rejected)
+}
+
+func TestCopilotCreateSession_UnrestrictedToolPolicyLeavesAvailableToolsUnset(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := newClientMock(ctrl)
+	sessionMock := NewMockCopilotSession(ctrl)
+
+	sourceDir := t.TempDir()
+
+	expectedConfig := sessionConfigMatcher{
+		t:         t,
+		sourceDir: sourceDir,
+		expected: copilot.SessionConfig{
+			OnPermissionRequest: allowAllTools,
+			Model:               "gpt-4o-mini",
+			SkillDirectories:    []string{sourceDir},
+		},
+	}
+
+	clientMock.EXPECT().CreateSession(gomock.Any(), expectedConfig).Return(sessionMock, nil)
+	sessionMock.EXPECT().Disconnect()
+	clientMock.EXPECT().DeleteSession(gomock.Any(), "session-1")
+
+	sessionMock.EXPECT().On(gomock.Any()).Times(3).Return(func() {})
+	sessionMock.EXPECT().SendAndWait(gomock.Any(), gomock.Any()).Return(&copilot.SessionEvent{}, nil)
+	sessionMock.EXPECT().SessionID().Return("session-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	engine := NewCopilotEngineBuilder("gpt-4o-mini", &CopilotEngineBuilderOptions{
+		NewCopilotClient: func(clientOptions *copilot.ClientOptions) CopilotClient { return clientMock },
+	}).Build()
+	defer func() {
+		require.NoError(t, engine.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, engine.Initialize(ctx))
+
+	resp, err := engine.Execute(ctx, &ExecutionRequest{
+		Message:    "hello?",
+		SourceDir:  sourceDir,
+		ToolPolicy: NewToolPolicy(nil), // unrestricted: no filter, no wrapper
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Success)
+	require.Equal(t, string(ToolPolicyUnrestricted), resp.ToolPolicyMode)
+}
+
+func TestCopilotExecute_ToolPolicyDenialFailsRun(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := newClientMock(ctrl)
+	sessionMock := NewMockCopilotSession(ctrl)
+
+	sourceDir := t.TempDir()
+
+	declared := []string{"read"}
+	policy := NewToolPolicy(&declared)
+
+	var capturedConfig *copilot.SessionConfig
+	clientMock.EXPECT().CreateSession(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, cfg *copilot.SessionConfig) (CopilotSession, error) {
+			capturedConfig = cfg
+			return sessionMock, nil
+		})
+	sessionMock.EXPECT().Disconnect()
+	clientMock.EXPECT().DeleteSession(gomock.Any(), "session-1")
+
+	sessionMock.EXPECT().On(gomock.Any()).Times(3).Return(func() {})
+	sessionMock.EXPECT().SendAndWait(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ copilot.MessageOptions) (*copilot.SessionEvent, error) {
+			// Simulate the model attempting an undeclared bash call mid-turn.
+			_, err := capturedConfig.OnPermissionRequest(&copilot.PermissionRequestShell{FullCommandText: "curl example.com"}, copilot.PermissionInvocation{})
+			require.NoError(t, err)
+			return &copilot.SessionEvent{}, nil
+		})
+	sessionMock.EXPECT().SessionID().Return("session-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	engine := NewCopilotEngineBuilder("gpt-4o-mini", &CopilotEngineBuilderOptions{
+		NewCopilotClient: func(clientOptions *copilot.ClientOptions) CopilotClient { return clientMock },
+	}).Build()
+	defer func() {
+		require.NoError(t, engine.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, engine.Initialize(ctx))
+
+	resp, err := engine.Execute(ctx, &ExecutionRequest{
+		Message:    "what's today's date?",
+		SourceDir:  sourceDir,
+		ToolPolicy: policy,
+	})
+	require.NoError(t, err)
+
+	// A denied tool attempt must fail the run even though the SDK call
+	// itself succeeded (no err, no SDK-reported errMsg).
+	require.False(t, resp.Success)
+	require.NotEmpty(t, resp.ErrorMsg)
+	require.Equal(t, string(ToolPolicyAllowList), resp.ToolPolicyMode)
+	require.Len(t, resp.ToolPolicyDenials, 1)
+	require.Equal(t, "bash", resp.ToolPolicyDenials[0].Tool)
+	require.Equal(t, "shell", resp.ToolPolicyDenials[0].Kind)
 }
 
 func TestCopilotInitialize_CustomProviderSkipsAuth(t *testing.T) {
@@ -1232,6 +1440,13 @@ func (m sessionConfigMatcher) Matches(x any) bool {
 		// Equal can't compare function ptrs..
 		expected.OnPermissionRequest = nil
 		c.OnPermissionRequest = nil
+
+		if expected.Hooks != nil {
+			require.NotNil(m.t, c.Hooks)
+			require.NotNil(m.t, c.Hooks.OnPreToolUse)
+			expected.Hooks = nil
+			c.Hooks = nil
+		}
 
 		// streamingPtr always returns a non-nil *bool now; when an expected
 		// fixture omits Streaming, treat actual *bool(false) as equivalent.
