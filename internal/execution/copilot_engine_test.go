@@ -201,6 +201,38 @@ func TestCopilotEngine_Execute_RejectsSandboxWithoutSanitizedEnvironment(t *test
 	require.ErrorContains(t, err, "requires an engine built with CopilotEngineBuilderOptions.SanitizeEnvironment")
 }
 
+func TestCopilotEngine_Execute_RejectsUntrackedSandboxWorkspace(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := NewMockCopilotClient(ctrl)
+	engine := NewCopilotEngineBuilder("test", &CopilotEngineBuilderOptions{
+		NewCopilotClient:    func(*copilot.ClientOptions) CopilotClient { return clientMock },
+		SanitizeEnvironment: true,
+	}).Build()
+
+	resp, err := engine.Execute(context.Background(), &ExecutionRequest{
+		Message:      "hello",
+		WorkspaceDir: t.TempDir(),
+		NoSkills:     true,
+		Sandbox:      &models.SandboxConfig{Enabled: true},
+	})
+
+	require.Nil(t, resp)
+	require.ErrorContains(t, err, "was not created by this engine")
+}
+
+func TestCopilotEngine_ResolveTrackedSandboxWorkspace_AcceptsEngineWorkspace(t *testing.T) {
+	engine := NewCopilotEngineBuilder("test", nil).Build()
+	t.Cleanup(func() { require.NoError(t, engine.Shutdown(context.Background())) })
+
+	workspaceDir, err := engine.setupWorkspace(context.Background(), nil, nil, true)
+	require.NoError(t, err)
+
+	resolved, err := engine.resolveTrackedSandboxWorkspace(workspaceDir)
+
+	require.NoError(t, err)
+	require.Equal(t, workspaceDir, resolved)
+}
+
 func TestCopilotEngine_Execute_FailsClosedWhenSandboxConfigurationFails(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	clientMock := newClientMock(ctrl)

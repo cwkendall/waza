@@ -385,16 +385,9 @@ func (e *CopilotEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Ex
 	if req.WorkspaceDir != "" {
 		workspaceDir = req.WorkspaceDir
 		if sandbox != nil && sandbox.Enabled {
-			workspaceDir, err = canonicalSandboxPath(workspaceDir)
+			workspaceDir, err = e.resolveTrackedSandboxWorkspace(workspaceDir)
 			if err != nil {
-				return nil, fmt.Errorf("resolving existing sandbox workspace %q: %w", req.WorkspaceDir, err)
-			}
-			info, statErr := os.Stat(workspaceDir)
-			if statErr != nil {
-				return nil, fmt.Errorf("reading existing sandbox workspace %q: %w", workspaceDir, statErr)
-			}
-			if !info.IsDir() {
-				return nil, fmt.Errorf("existing sandbox workspace %q is not a directory", workspaceDir)
+				return nil, err
 			}
 		}
 	} else {
@@ -870,6 +863,29 @@ func (*CopilotEngine) getSkillDirs(cwd string, req *ExecutionRequest) []string {
 	}
 
 	return skillDirs
+}
+
+func (e *CopilotEngine) resolveTrackedSandboxWorkspace(path string) (string, error) {
+	canonicalPath, err := canonicalSandboxPath(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving existing sandbox workspace %q: %w", path, err)
+	}
+	info, err := os.Stat(canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("reading existing sandbox workspace %q: %w", canonicalPath, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("existing sandbox workspace %q is not a directory", canonicalPath)
+	}
+
+	e.workspacesMu.Lock()
+	defer e.workspacesMu.Unlock()
+	for _, tracked := range e.workspaces {
+		if tracked == canonicalPath {
+			return canonicalPath, nil
+		}
+	}
+	return "", fmt.Errorf("sandbox workspace %q was not created by this engine", canonicalPath)
 }
 
 func (e *CopilotEngine) setupWorkspace(ctx context.Context, resources []ResourceFile, gitResources []models.GitResource, sandboxed bool) (string, error) {

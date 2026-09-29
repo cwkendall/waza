@@ -67,6 +67,10 @@ func (r *Root) FS() fs.FS {
 // ReadRegularFile reads a root-relative regular file without following symlinks.
 // A non-positive maxSize disables the size limit.
 func (r *Root) ReadRegularFile(path string, maxSize int64) ([]byte, fs.FileInfo, error) {
+	return r.readRegularFile(path, maxSize, nil)
+}
+
+func (r *Root) readRegularFile(path string, maxSize int64, beforeRead func()) ([]byte, fs.FileInfo, error) {
 	cleanPath, parts, err := validateRelativePath(path)
 	if err != nil {
 		return nil, nil, err
@@ -109,10 +113,30 @@ func (r *Root) ReadRegularFile(path string, maxSize int64) ([]byte, fs.FileInfo,
 		_ = file.Close()
 		return nil, openedInfo, fmt.Errorf("%w: path %q is %d bytes (limit %d)", ErrFileTooLarge, path, openedInfo.Size(), maxSize)
 	}
-	content, err := io.ReadAll(file)
+	if beforeRead != nil {
+		beforeRead()
+	}
+
+	reader := io.Reader(file)
+	if maxSize > 0 {
+		reader = io.LimitReader(file, maxSize)
+	}
+	content, err := io.ReadAll(reader)
 	if err != nil {
 		_ = file.Close()
 		return nil, nil, fmt.Errorf("reading path %q: %w", path, err)
+	}
+	if maxSize > 0 && int64(len(content)) == maxSize {
+		var overflow [1]byte
+		n, overflowErr := file.Read(overflow[:])
+		if overflowErr != nil && !errors.Is(overflowErr, io.EOF) {
+			_ = file.Close()
+			return nil, nil, fmt.Errorf("checking path %q size limit: %w", path, overflowErr)
+		}
+		if n > 0 {
+			_ = file.Close()
+			return nil, openedInfo, fmt.Errorf("%w: path %q grew beyond limit %d while reading", ErrFileTooLarge, path, maxSize)
+		}
 	}
 	if err := file.Close(); err != nil {
 		return nil, nil, fmt.Errorf("closing path %q: %w", path, err)

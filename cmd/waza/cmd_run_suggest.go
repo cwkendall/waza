@@ -153,16 +153,40 @@ func generateFakeSuggestionReport(spec *models.EvalSpec, failedTests, failedTrig
 }
 
 func resolveSuggestionSkillPaths(spec *models.EvalSpec, specPath string) ([]string, error) {
+	if spec.Config.AllSkillsDisabled() {
+		return nil, nil
+	}
+
 	specDir := filepath.Dir(specPath)
-	configuredRoots := utils.ResolvePaths(spec.Config.SkillPaths, specDir)
+	allConfiguredRoots := utils.ResolvePaths(spec.Config.SkillPaths, specDir)
+	configuredRoots := utils.ResolvePaths(spec.Config.FilteredSkillPaths(), specDir)
+	allowedConfiguredRoots := make(map[string]bool, len(configuredRoots))
+	for _, root := range configuredRoots {
+		allowedConfiguredRoots[filepath.Clean(root)] = true
+	}
+	blockedRoots := make(map[string]bool)
+	for _, root := range allConfiguredRoots {
+		cleanRoot := filepath.Clean(root)
+		if !allowedConfiguredRoots[cleanRoot] {
+			blockedRoots[cleanRoot] = true
+		}
+	}
+
 	discoveryRoots := append([]string(nil), configuredRoots...)
-	discoveryRoots = append(discoveryRoots, specDir)
+	if !blockedRoots[filepath.Clean(specDir)] {
+		discoveryRoots = append(discoveryRoots, specDir)
+	}
 	if parent := filepath.Dir(specDir); parent != "" {
-		discoveryRoots = append(discoveryRoots, filepath.Join(parent, "skills"))
+		conventionalRoot := filepath.Join(parent, "skills")
+		if !blockedRoots[filepath.Clean(conventionalRoot)] {
+			discoveryRoots = append(discoveryRoots, conventionalRoot)
+		}
 	}
 
 	paths := append([]string(nil), configuredRoots...)
-	paths = append(paths, specDir)
+	if !blockedRoots[filepath.Clean(specDir)] {
+		paths = append(paths, specDir)
+	}
 	if spec.Config.Sandbox != nil && spec.Config.Sandbox.Enabled {
 		paths = nil
 	}

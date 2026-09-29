@@ -78,6 +78,96 @@ func TestResolveSuggestionSkillPaths_IncludesEvaluatedAgentDirectory(t *testing.
 	require.Equal(t, []string{canonicalAgentDir}, got)
 }
 
+func TestResolveSuggestionSkillPaths_ExcludesDisabledSkillRoots(t *testing.T) {
+	root := t.TempDir()
+	specDir := filepath.Join(root, "evals")
+	disabledRoot := filepath.Join(root, "disabled")
+	enabledRoot := filepath.Join(root, "enabled")
+	disabledTarget := filepath.Join(disabledRoot, "target")
+	enabledTarget := filepath.Join(enabledRoot, "target")
+	require.NoError(t, os.MkdirAll(specDir, 0o755))
+	require.NoError(t, os.MkdirAll(disabledTarget, 0o755))
+	require.NoError(t, os.MkdirAll(enabledTarget, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(disabledTarget, "SKILL.md"), []byte("---\nname: target\n---\ndisabled"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(enabledTarget, "SKILL.md"), []byte("---\nname: target\n---\nenabled"), 0o644))
+
+	spec := &models.EvalSpec{
+		SkillName: "target",
+		Config: models.Config{
+			SkillPaths:     []string{disabledRoot, enabledRoot},
+			DisabledSkills: []string{filepath.Base(disabledRoot)},
+			Sandbox:        &models.SandboxConfig{Enabled: true},
+		},
+	}
+
+	got, err := resolveSuggestionSkillPaths(spec, filepath.Join(specDir, "eval.yaml"))
+
+	require.NoError(t, err)
+	canonicalEnabledTarget, err := filepath.EvalSymlinks(enabledTarget)
+	require.NoError(t, err)
+	require.Equal(t, []string{canonicalEnabledTarget}, got)
+}
+
+func TestResolveSuggestionSkillPaths_AllSkillsDisabledExcludesImplicitRoots(t *testing.T) {
+	specDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(specDir, "target.agent.md"), []byte("---\nname: target\n---\n"), 0o644))
+	spec := &models.EvalSpec{
+		SkillName: "target",
+		Config: models.Config{
+			DisabledSkills: []string{"*"},
+			Sandbox:        &models.SandboxConfig{Enabled: true},
+		},
+	}
+
+	got, err := resolveSuggestionSkillPaths(spec, filepath.Join(specDir, "eval.yaml"))
+
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestResolveSuggestionSkillPaths_DoesNotReintroduceDisabledImplicitRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		configureRoot func(root, specDir string) string
+		disabledName  func(root, specDir string) string
+		definitionDir func(root, specDir string) string
+	}{
+		{
+			name:          "conventional skills directory",
+			configureRoot: func(_, _ string) string { return "../skills" },
+			disabledName:  func(_, _ string) string { return "skills" },
+			definitionDir: func(root, _ string) string { return filepath.Join(root, "skills", "target") },
+		},
+		{
+			name:          "eval directory",
+			configureRoot: func(_, specDir string) string { return specDir },
+			disabledName:  func(_, specDir string) string { return filepath.Base(specDir) },
+			definitionDir: func(_, specDir string) string { return specDir },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			specDir := filepath.Join(root, "evals")
+			definitionDir := tc.definitionDir(root, specDir)
+			require.NoError(t, os.MkdirAll(definitionDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(definitionDir, "SKILL.md"), []byte("---\nname: target\n---\n"), 0o644))
+			spec := &models.EvalSpec{
+				SkillName: "target",
+				Config: models.Config{
+					SkillPaths:     []string{tc.configureRoot(root, specDir)},
+					DisabledSkills: []string{tc.disabledName(root, specDir)},
+					Sandbox:        &models.SandboxConfig{Enabled: true},
+				},
+			}
+
+			got, err := resolveSuggestionSkillPaths(spec, filepath.Join(specDir, "eval.yaml"))
+
+			require.NoError(t, err)
+			require.Empty(t, got)
+		})
+	}
+}
+
 func TestMaybeGenerateSuggestionReport_SkipsWhenNoFailures(t *testing.T) {
 	oldSuggest := suggestFlag
 	suggestFlag = true
